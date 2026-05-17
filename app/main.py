@@ -29,6 +29,37 @@ class Settings(BaseSettings):
     github_client_secret: str = Field(default='', alias='GITHUB_CLIENT_SECRET')
     github_app_webhook_secret: str = Field(default='', alias='GITHUB_APP_WEBHOOK_SECRET')
 
+from __future__ import annotations
+
+from functools import lru_cache
+from pathlib import Path
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file='.env',
+        env_file_encoding='utf-8',
+        extra='ignore',
+    )
+
+    telegram_bot_token: str = Field(default='', alias='TELEGRAM_BOT_TOKEN')
+    telegram_owner_ids: str = Field(default='', alias='TELEGRAM_OWNER_IDS')
+    public_url: str = Field(default='', alias='PUBLIC_URL')
+    telegram_webhook_secret: str = Field(default='change_me', alias='TELEGRAM_WEBHOOK_SECRET')
+
+    admin_api_token: str = Field(default='', alias='ADMIN_API_TOKEN')
+
+    github_token: str = Field(default='', alias='GITHUB_TOKEN')
+    github_default_branch: str = Field(default='main', alias='GITHUB_DEFAULT_BRANCH')
+    github_app_id: str = Field(default='', alias='GITHUB_APP_ID')
+    github_app_private_key: str = Field(default='', alias='GITHUB_APP_PRIVATE_KEY')
+    github_client_id: str = Field(default='', alias='GITHUB_CLIENT_ID')
+    github_client_secret: str = Field(default='', alias='GITHUB_CLIENT_SECRET')
+    github_app_webhook_secret: str = Field(default='', alias='GITHUB_APP_WEBHOOK_SECRET')
+
     database_path: str = Field(default='/app/_data/agent.db', alias='DATABASE_PATH')
     encryption_key: str = Field(default='', alias='ENCRYPTION_KEY')
 
@@ -69,6 +100,20 @@ class Settings(BaseSettings):
         return {
             item.strip()
             for item in self.supabase_allowed_tables.split(',')
+            if item.strip()
+        }
+
+    def ensure_dirs(self) -> None:
+        Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(self.work_dir).mkdir(parents=True, exist_ok=True)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    settings = Settings()
+    settings.ensure_dirs()
+    return settings
+item in self.supabase_allowed_tables.split(',')
             if item.strip()
         }
 

@@ -8,7 +8,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8', extra='ignore')
+    model_config = SettingsConfigDict(
+        env_file='.env',
+        env_file_encoding='utf-8',
+        extra='ignore',
+    )
 
     telegram_bot_token: str = Field(default='', alias='TELEGRAM_BOT_TOKEN')
     telegram_owner_ids: str = Field(default='', alias='TELEGRAM_OWNER_IDS')
@@ -50,6 +54,10 @@ class Settings(BaseSettings):
 
     @property
     def webhook_path(self) -> str:
+        return f'/api/telegram/webhook/{self.telegram_webhook_secret}'
+
+    @property
+    def legacy_webhook_path(self) -> str:
         return f'/telegram/webhook/{self.telegram_webhook_secret}'
 
     @property
@@ -58,7 +66,11 @@ class Settings(BaseSettings):
 
     @property
     def allowed_tables(self) -> set[str]:
-        return {x.strip() for x in self.supabase_allowed_tables.split(',') if x.strip()}
+        return {
+            item.strip()
+            for item in self.supabase_allowed_tables.split(',')
+            if item.strip()
+        }
 
     def ensure_dirs(self) -> None:
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
@@ -67,6 +79,6 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    s = Settings()
-    s.ensure_dirs()
-    return s
+    settings = Settings()
+    settings.ensure_dirs()
+    return settings

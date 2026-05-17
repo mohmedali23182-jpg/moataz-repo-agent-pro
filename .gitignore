@@ -5,3 +5,6 @@ __pycache__/
 _data/
 *.db
 *.zip
+
+.env.final
+*.final

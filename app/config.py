@@ -43,6 +43,21 @@ class Settings(BaseSettings):
     supabase_allowed_tables: str = Field(default='', alias='SUPABASE_ALLOWED_TABLES')
     log_level: str = Field(default='INFO', alias='LOG_LEVEL')
 
+    # Agent terminal / future integrations
+    agent_allow_terminal: bool = Field(default=False, alias='AGENT_ALLOW_TERMINAL')
+    agent_require_approval: bool = Field(default=True, alias='AGENT_REQUIRE_APPROVAL')
+    agent_max_command_seconds: int = Field(default=1200, alias='AGENT_MAX_COMMAND_SECONDS')
+    agent_allowed_commands: str = Field(
+        default='npm,pnpm,yarn,python,pip,pytest,node,git,ls,cat,sed,grep',
+        alias='AGENT_ALLOWED_COMMANDS',
+    )
+    agent_default_workdir: str = Field(default='.', alias='AGENT_DEFAULT_WORKDIR')
+
+    openrouter_api_key: str = Field(default='', alias='OPENROUTER_API_KEY')
+    ai_agent_api_url: str = Field(default='', alias='AI_AGENT_API_URL')
+    ai_agent_api_key: str = Field(default='', alias='AI_AGENT_API_KEY')
+    github_webhook_secret: str = Field(default='', alias='GITHUB_WEBHOOK_SECRET')
+
     @property
     def owner_ids(self) -> set[int]:
         result: set[int] = set()

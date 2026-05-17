@@ -48,7 +48,8 @@ class GitHubClient:
         }
 
     async def request(self, method: str, path: str, **kwargs: Any) -> Any:
-        async with httpx.AsyncClient(timeout=60) as client:
+        timeout = kwargs.pop('timeout', 60)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
             r = await client.request(method, GITHUB_API + path, headers=self.headers, **kwargs)
         if r.status_code >= 400:
             detail = r.text[:1200]
@@ -56,6 +57,15 @@ class GitHubClient:
         if r.status_code == 204:
             return {}
         return r.json()
+
+    async def request_bytes(self, method: str, path: str, **kwargs: Any) -> bytes:
+        timeout = kwargs.pop('timeout', 120)
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            r = await client.request(method, GITHUB_API + path, headers=self.headers, **kwargs)
+        if r.status_code >= 400:
+            detail = r.text[:1200]
+            raise GitHubError(f'GitHub API error {r.status_code}: {detail}')
+        return r.content
 
     async def viewer(self) -> dict[str, Any]:
         return await self.request('GET', '/user')
@@ -111,6 +121,18 @@ class GitHubClient:
 
     async def workflow_dispatch(self, owner: str, repo: str, workflow_id: str, ref: str, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self.request('POST', f'/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches', json={'ref': ref, 'inputs': inputs or {}})
+
+    async def list_workflow_runs(self, owner: str, repo: str, workflow_id: str, branch: str | None = None, per_page: int = 10) -> dict[str, Any]:
+        query = f'per_page={per_page}'
+        if branch:
+            query += f'&branch={branch}'
+        return await self.request('GET', f'/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs?{query}')
+
+    async def get_workflow_run(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
+        return await self.request('GET', f'/repos/{owner}/{repo}/actions/runs/{run_id}')
+
+    async def get_workflow_run_logs_zip(self, owner: str, repo: str, run_id: int) -> bytes:
+        return await self.request_bytes('GET', f'/repos/{owner}/{repo}/actions/runs/{run_id}/logs')
 
     async def add_collaborator(self, owner: str, repo: str, username: str, permission: str = 'push') -> dict[str, Any]:
         return await self.request('PUT', f'/repos/{owner}/{repo}/collaborators/{username}', json={'permission': permission})

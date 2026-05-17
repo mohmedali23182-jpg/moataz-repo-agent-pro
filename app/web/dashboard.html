@@ -60,8 +60,24 @@
     <div class="card">
       <h2>فك ضغط ورفع</h2>
       <label>Target folder</label><input id="targetDir" value="uploaded_archive">
+      <label><input id="normalize" type="checkbox" checked style="width:auto"> ترتيب المشروع تلقائيًا للنشر</label>
       <label>Archive</label><input id="archive" type="file">
       <button onclick="uploadArchive()">فك ورفع</button>
+    </div>
+
+    <div class="card">
+      <h2>Agent تعديل مباشر</h2>
+      <p class="hint">مثال: replace app/config.py ثم المحتوى في السطور التالية.</p>
+      <label>Instruction</label><textarea id="agentInstruction" placeholder="replace README.md&#10;Hello from agent"></textarea>
+      <button onclick="applyAgent()">تنفيذ Agent Patch</button>
+    </div>
+
+    <div class="card">
+      <h2>Terminal عبر GitHub Actions</h2>
+      <label>Command</label><textarea id="termCommand" placeholder="npm run build"></textarea>
+      <label>Workdir</label><input id="termWorkdir" value=".">
+      <label><input id="termCommit" type="checkbox" style="width:auto"> Commit changes بعد التنفيذ</label>
+      <button onclick="runTerminal()">تشغيل الطرفية</button>
     </div>
 
     <div class="card">
@@ -91,8 +107,10 @@ async function createRepo(){ try{ out(await api('/api/github/repos',{token:$('to
 async function listFiles(){ try{ const c=ctx(); out(await api('/api/github/list?path='+encodeURIComponent($('listPath').value),c)); }catch(e){out(e)} }
 async function writeFile(){ try{ out(await api('/api/github/write',{...ctx(),path:$('writePath').value,content:$('content').value,message:'Update from dashboard'})); }catch(e){out(e)} }
 async function deleteFile(){ try{ out(await api('/api/github/delete',{...ctx(),path:$('deletePath').value,message:'Delete from dashboard'})); }catch(e){out(e)} }
-async function uploadArchive(){ try{ const fd=new FormData(); fd.append('repo',$('repo').value); fd.append('branch',$('branch').value||'main'); fd.append('target_dir',$('targetDir').value); fd.append('token',$('token').value||''); fd.append('file',$('archive').files[0]); const r=await fetch('/api/github/upload-archive',{method:'POST',headers:{'Authorization':'Bearer '+$('admin').value},body:fd}); const data=await r.json(); if(!r.ok) throw data; out(data); }catch(e){out(e)} }
+async function uploadArchive(){ try{ const fd=new FormData(); fd.append('repo',$('repo').value); fd.append('branch',$('branch').value||'main'); fd.append('target_dir',$('targetDir').value); fd.append('token',$('token').value||''); fd.append('normalize',$('normalize').checked ? 'true' : 'false'); fd.append('file',$('archive').files[0]); const r=await fetch('/api/github/upload-archive',{method:'POST',headers:{'Authorization':'Bearer '+$('admin').value},body:fd}); const data=await r.json(); if(!r.ok) throw data; out(data); }catch(e){out(e)} }
 async function readSupabase(){ try{ const r=await fetch('/api/supabase/'+encodeURIComponent($('table').value)+'?limit='+encodeURIComponent($('limit').value),{headers:{'Authorization':'Bearer '+$('admin').value}}); const data=await r.json(); if(!r.ok) throw data; out(data); }catch(e){out(e)} }
+async function applyAgent(){ try{ out('جار تنفيذ Agent Patch...'); out(await api('/api/agent/apply',{...ctx(),instruction:$('agentInstruction').value})); }catch(e){out(e)} }
+async function runTerminal(){ try{ out('جار تشغيل GitHub Actions وقد يستغرق دقائق...'); out(await api('/api/github/term',{...ctx(),command:$('termCommand').value,workdir:$('termWorkdir').value||'.',commit_changes:$('termCommit').checked,commit_message:'Apply terminal changes from dashboard'})); }catch(e){out(e)} }
 </script>
 </body>
 </html>

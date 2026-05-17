@@ -13,7 +13,10 @@ from pydantic import BaseModel
 from app.bot.telegram_bot import build_bot, build_dispatcher
 from app.config import get_settings
 from app.services.archive import extract_archive
+from app.services.project_normalizer import list_files_for_upload, normalize_project
 from app.services.github_client import GitHubAuth, GitHubClient, GitHubError, parse_repo
+from app.services.actions_runner import ActionsRunner
+from app.services.repo_patch import apply_agent_instruction
 from app.services.supabase_client import SupabaseClient
 
 settings = get_settings()
@@ -70,6 +73,17 @@ class CreateRepoRequest(BaseModel):
     description: str = 'Created by Moataz Repo Agent'
 
 
+class AgentInstructionRequest(RepoContext):
+    instruction: str
+
+
+class TerminalRunRequest(RepoContext):
+    command: str
+    workdir: str = '.'
+    commit_changes: bool = False
+    commit_message: str = 'Apply agent terminal changes'
+
+
 def client_from_token(token: str | None) -> GitHubClient:
     github_token = token or settings.github_token
 
@@ -121,6 +135,9 @@ async def health() -> dict[str, Any]:
         'webhook_url': settings.webhook_url if settings.public_url else '',
         'github_token_env': bool(settings.github_token),
         'supabase_enabled': SupabaseClient().enabled(),
+        'agent_allow_terminal': settings.agent_allow_terminal,
+        'agent_require_approval': settings.agent_require_approval,
+        'agent_allowed_commands': settings.agent_allowed_commands,
     }
 
 
@@ -255,6 +272,7 @@ async def api_upload_archive(
     branch: str = Form('main'),
     target_dir: str = Form('uploaded_archive'),
     token: str | None = Form(None),
+    normalize: bool = Form(True),
     file: UploadFile = File(...),
 ):
     client = client_from_token(token)
@@ -274,11 +292,27 @@ async def api_upload_archive(
 
     files = extract_archive(src, extract_dir)
 
+    upload_root = extract_dir
+    report: dict[str, Any] | None = None
+
+    if normalize:
+        normalized_parent = work / f'{src.stem}_normalized_output'
+        if normalized_parent.exists():
+            import shutil
+            shutil.rmtree(normalized_parent)
+        upload_root, normalizer_report = normalize_project(extract_dir, normalized_parent)
+        report = normalizer_report.to_dict()
+        files = list_files_for_upload(upload_root)
+
     uploaded: list[str] = []
+    clean_target = target_dir.strip().strip('/')
 
     for p in files:
-        rel = p.relative_to(extract_dir).as_posix()
-        gh_path = f'{target_dir.strip("/")}/{rel}'.replace('//', '/')
+        rel = p.relative_to(upload_root).as_posix()
+        if clean_target in {'', '.', '/', 'root', 'ROOT'}:
+            gh_path = rel.strip('/')
+        else:
+            gh_path = f'{clean_target}/{rel.strip("/")}'.replace('//', '/')
 
         await client.put_file(
             owner=owner,
@@ -286,15 +320,60 @@ async def api_upload_archive(
             path=gh_path,
             content=p.read_bytes(),
             branch=branch,
-            message=f'Upload extracted {gh_path}',
+            message=f'Upload normalized {gh_path}' if normalize else f'Upload extracted {gh_path}',
         )
 
         uploaded.append(gh_path)
 
     return {
         'ok': True,
+        'normalized': normalize,
+        'report': report,
         'uploaded_count': len(uploaded),
         'uploaded': uploaded[:100],
+    }
+
+
+
+
+@app.post('/api/agent/apply', dependencies=[Depends(require_admin)])
+async def api_agent_apply(req: AgentInstructionRequest):
+    client = client_from_token(req.token)
+    result = await apply_agent_instruction(
+        client=client,
+        repo_value=req.repo,
+        branch=req.branch,
+        instruction=req.instruction,
+    )
+    return {
+        'ok': True,
+        'action': result.action,
+        'path': result.path,
+        'message': result.message,
+    }
+
+
+@app.post('/api/github/term', dependencies=[Depends(require_admin)])
+async def api_github_term(req: TerminalRunRequest):
+    client = client_from_token(req.token)
+    owner, repo = parse_repo(req.repo)
+    runner = ActionsRunner(client)
+    result = await runner.dispatch_and_wait(
+        owner=owner,
+        repo=repo,
+        branch=req.branch,
+        command=req.command,
+        workdir=req.workdir,
+        commit_changes=req.commit_changes,
+        commit_message=req.commit_message,
+    )
+    return {
+        'ok': result.conclusion == 'success',
+        'run_id': result.run_id,
+        'status': result.status,
+        'conclusion': result.conclusion,
+        'html_url': result.html_url,
+        'logs_tail': result.logs[-12000:],
     }
 
 

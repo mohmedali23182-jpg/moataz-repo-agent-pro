@@ -145,3 +145,135 @@ https://your-service.up.railway.app/
 - الأفضل وضع GITHUB_TOKEN داخل Railway إذا البوت خاص بك فقط.
 - إذا تريد نظامًا عامًا لعدة مستخدمين، استخدم GitHub App/OAuth لاحقًا بدل استقبال التوكن يدويًا.
 - لا تعطِ صلاحية Administration إلا عند الحاجة.
+
+
+## Auto Project Normalizer
+
+تمت إضافة خدمة ترتيب المشاريع تلقائيًا بعد فك الضغط. عند استخدام `/unpack` أو رفع أرشيف من اللوحة مع خيار الترتيب، سيقوم البوت بـ:
+
+- اكتشاف جذر المشروع الحقيقي حتى لو كان داخل `target/folder/...`.
+- نقل محتويات الجذر الحقيقي إلى بنية نظيفة.
+- تجاهل الملفات الثقيلة أو الحساسة مثل `.env`, `node_modules`, `.next`, `.git`.
+- إنشاء `.env.example`, `Dockerfile`, `railway.json`, وREADME عند الحاجة.
+- رفع النسخة المرتبة إلى GitHub.
+
+الأوامر الجديدة:
+
+```text
+/normalize
+```
+
+يرتب المشروع ويرسل لك `normalized-project.zip` بدون رفع إلى GitHub.
+
+```text
+/unpack target/folder
+```
+
+يفك الضغط، يرتب المشروع، ثم يرفعه إلى GitHub. استخدم `.` أو `root` كمسار هدف للرفع إلى جذر المستودع.
+
+```text
+/unpack_raw target/folder
+```
+
+يفك الضغط ويرفع كما هو بدون ترتيب.
+
+> الترتيب يجعل بنية المشروع قابلة للنشر، لكنه لا يضمن نجاح التشغيل إذا كان الكود نفسه يحتوي أخطاء أو تنقصه متغيرات البيئة وقاعدة البيانات.
+
+## GitHub Agent + Terminal Commands
+
+This version adds a real Telegram-side agent layer:
+
+### Direct GitHub patching
+
+Use `/agent` or `/patch` for deterministic file operations through the GitHub Contents API:
+
+```text
+/agent https://github.com/OWNER/REPO
+replace app/config.py
+<full new file content>
+```
+
+Supported operations:
+
+```text
+read path/to/file
+replace path/to/file
+append path/to/file
+delete path/to/file
+mkdir path/to/folder
+regex path/to/file
+PATTERN
+---
+REPLACEMENT
+```
+
+### Terminal execution through GitHub Actions
+
+Use `/term` to run safe terminal commands in the target repository through `workflow_dispatch`:
+
+```text
+/term https://github.com/OWNER/REPO
+npm run build
+```
+
+Optional flags, each on its own line:
+
+```text
+--workdir=.
+--commit
+--commit-message=Apply terminal fixes
+```
+
+If `AGENT_REQUIRE_APPROVAL=true`, the bot prepares the terminal command and waits for:
+
+```text
+/approve
+```
+
+Cancel with:
+
+```text
+/cancel_term
+```
+
+Install the workflow manually if needed:
+
+```text
+/install_workflow https://github.com/OWNER/REPO
+```
+
+The bot auto-installs `.github/workflows/agent-command.yml` when `/term` is first used. GitHub may need 30-60 seconds before the workflow becomes dispatchable.
+
+### Required GitHub token permissions
+
+For `/agent` patching:
+
+```text
+Contents: Read and write
+Metadata: Read-only
+```
+
+For `/term` and installing/running the workflow:
+
+```text
+Contents: Read and write
+Actions: Read and write
+Workflows: Read and write
+```
+
+### Railway variables for agent mode
+
+```env
+AGENT_ALLOW_TERMINAL=true
+AGENT_REQUIRE_APPROVAL=true
+AGENT_MAX_COMMAND_SECONDS=1200
+AGENT_ALLOWED_COMMANDS=npm,pnpm,yarn,python,pip,pytest,node,git,ls,cat,sed,grep
+AGENT_DEFAULT_WORKDIR=.
+```
+
+Security notes:
+
+- Terminal execution is disabled unless `AGENT_ALLOW_TERMINAL=true`.
+- Dangerous shell patterns are rejected.
+- Only commands whose first word is in `AGENT_ALLOWED_COMMANDS` are accepted.
+- Keep `AGENT_REQUIRE_APPROVAL=true` for production.

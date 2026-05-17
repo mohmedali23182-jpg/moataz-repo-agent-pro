@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Moataz Repo Agent</title>
+  <style>
+    :root { color-scheme: dark; --bg:#08111f; --card:rgba(255,255,255,.08); --line:rgba(255,255,255,.15); --txt:#eef6ff; --muted:#9fb2c7; --accent:#60a5fa; }
+    body{margin:0;font-family:system-ui,Tahoma,Arial;background:radial-gradient(circle at top,#12345c,#08111f 55%,#050812);color:var(--txt)}
+    .wrap{max-width:1150px;margin:auto;padding:28px}.hero{display:grid;gap:12px;margin-bottom:20px}.badge{display:inline-flex;width:max-content;border:1px solid var(--line);border-radius:999px;padding:8px 12px;color:#d7e8ff;background:rgba(255,255,255,.06)}
+    h1{font-size:34px;margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:0 20px 60px rgba(0,0,0,.24);backdrop-filter:blur(14px)}
+    label{display:block;margin:10px 0 6px;color:var(--muted);font-size:14px}input,textarea,select{width:100%;box-sizing:border-box;border:1px solid var(--line);background:rgba(0,0,0,.25);color:var(--txt);border-radius:14px;padding:11px;outline:none}textarea{min-height:120px;direction:ltr;text-align:left}button{border:0;border-radius:14px;padding:11px 14px;margin-top:12px;background:linear-gradient(135deg,#38bdf8,#6366f1);color:white;font-weight:700;cursor:pointer}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.out{white-space:pre-wrap;direction:ltr;text-align:left;background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:18px;padding:14px;min-height:150px;overflow:auto}.hint{color:var(--muted);line-height:1.8}.danger{background:linear-gradient(135deg,#fb7185,#ef4444)}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <section class="hero">
+    <span class="badge">Telegram + GitHub + Supabase Agent</span>
+    <h1>لوحة Moataz Repo Agent</h1>
+    <p class="hint">لوحة شفافة للتحكم بالمستودعات عبر API. ضع ADMIN_API_TOKEN، ثم GitHub Token أو اتركه فارغًا لاستخدام GITHUB_TOKEN من Railway.</p>
+  </section>
+
+  <div class="grid">
+    <div class="card">
+      <h2>الإعدادات</h2>
+      <label>ADMIN_API_TOKEN</label><input id="admin" placeholder="Bearer token" type="password">
+      <label>GitHub Token اختياري</label><input id="token" placeholder="github_pat_xxx" type="password">
+      <label>Repo</label><input id="repo" placeholder="owner/repo أو رابط المستودع">
+      <label>Branch</label><input id="branch" value="main">
+      <button onclick="saveLocal()">حفظ محلي في المتصفح</button>
+    </div>
+
+    <div class="card">
+      <h2>إنشاء مستودع</h2>
+      <label>اسم المستودع</label><input id="newRepo" placeholder="my-project">
+      <label>الوصف</label><input id="desc" value="Created by Moataz Repo Agent">
+      <select id="private"><option value="true">Private</option><option value="false">Public</option></select>
+      <button onclick="createRepo()">إنشاء</button>
+    </div>
+
+    <div class="card">
+      <h2>استعراض الملفات</h2>
+      <label>المسار</label><input id="listPath" placeholder="اتركه فارغًا للجذر">
+      <button onclick="listFiles()">استعراض</button>
+    </div>
+
+    <div class="card">
+      <h2>كتابة/تعديل ملف</h2>
+      <label>Path</label><input id="writePath" placeholder="src/app/page.tsx">
+      <label>Content</label><textarea id="content" placeholder="اكتب المحتوى هنا"></textarea>
+      <button onclick="writeFile()">حفظ في GitHub</button>
+    </div>
+
+    <div class="card">
+      <h2>حذف ملف</h2>
+      <label>Path</label><input id="deletePath" placeholder="old/file.txt">
+      <button class="danger" onclick="deleteFile()">حذف</button>
+    </div>
+
+    <div class="card">
+      <h2>فك ضغط ورفع</h2>
+      <label>Target folder</label><input id="targetDir" value="uploaded_archive">
+      <label>Archive</label><input id="archive" type="file">
+      <button onclick="uploadArchive()">فك ورفع</button>
+    </div>
+
+    <div class="card">
+      <h2>Supabase</h2>
+      <label>Table</label><input id="table" placeholder="posts">
+      <label>Limit</label><input id="limit" value="10">
+      <button onclick="readSupabase()">قراءة جدول مسموح</button>
+    </div>
+
+    <div class="card">
+      <h2>الناتج</h2>
+      <div id="out" class="out">جاهز.</div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+function out(x){ $('out').textContent = typeof x === 'string' ? x : JSON.stringify(x,null,2); }
+function saveLocal(){ ['admin','token','repo','branch'].forEach(id=>localStorage.setItem(id,$(id).value)); out('تم الحفظ في المتصفح فقط.'); }
+['admin','token','repo','branch'].forEach(id=>{ if(localStorage.getItem(id)) $(id).value=localStorage.getItem(id); });
+async function api(path, body){
+  const r = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+$('admin').value},body:JSON.stringify(body)});
+  const t = await r.text(); let data; try{data=JSON.parse(t)}catch{data=t} if(!r.ok) throw data; return data;
+}
+function ctx(){ return {token:$('token').value||null, repo:$('repo').value, branch:$('branch').value||'main'}; }
+async function createRepo(){ try{ out(await api('/api/github/repos',{token:$('token').value||null,name:$('newRepo').value,private:$('private').value==='true',description:$('desc').value})); }catch(e){out(e)} }
+async function listFiles(){ try{ const c=ctx(); out(await api('/api/github/list?path='+encodeURIComponent($('listPath').value),c)); }catch(e){out(e)} }
+async function writeFile(){ try{ out(await api('/api/github/write',{...ctx(),path:$('writePath').value,content:$('content').value,message:'Update from dashboard'})); }catch(e){out(e)} }
+async function deleteFile(){ try{ out(await api('/api/github/delete',{...ctx(),path:$('deletePath').value,message:'Delete from dashboard'})); }catch(e){out(e)} }
+async function uploadArchive(){ try{ const fd=new FormData(); fd.append('repo',$('repo').value); fd.append('branch',$('branch').value||'main'); fd.append('target_dir',$('targetDir').value); fd.append('token',$('token').value||''); fd.append('file',$('archive').files[0]); const r=await fetch('/api/github/upload-archive',{method:'POST',headers:{'Authorization':'Bearer '+$('admin').value},body:fd}); const data=await r.json(); if(!r.ok) throw data; out(data); }catch(e){out(e)} }
+async function readSupabase(){ try{ const r=await fetch('/api/supabase/'+encodeURIComponent($('table').value)+'?limit='+encodeURIComponent($('limit').value),{headers:{'Authorization':'Bearer '+$('admin').value}}); const data=await r.json(); if(!r.ok) throw data; out(data); }catch(e){out(e)} }
+</script>
+</body>
+</html>

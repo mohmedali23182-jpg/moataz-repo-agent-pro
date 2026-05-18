@@ -274,6 +274,8 @@ class Store:
             'netlify': self.settings.netlify_auth_token,
             'fly': self.settings.fly_api_token,
             'replit': self.settings.replit_token,
+            'gdrive': self.settings.google_drive_token,
+            'google_drive': self.settings.google_drive_token,
         }
         return env_map.get(platform, ''), {}
 
@@ -287,6 +289,8 @@ class Store:
             'netlify': self.settings.netlify_auth_token,
             'fly': self.settings.fly_api_token,
             'replit': self.settings.replit_token,
+            'gdrive': self.settings.google_drive_token,
+            'google_drive': self.settings.google_drive_token,
         }.items():
             if token and not any(x['platform'] == p for x in saved):
                 saved.append({'platform': p, 'source': 'env', 'created_at': '', 'updated_at': ''})
@@ -312,7 +316,7 @@ class Store:
         row = self.conn.execute('SELECT * FROM ai_tokens WHERE telegram_id=? AND provider=?', (telegram_id, provider)).fetchone()
         if row:
             return provider, self.decrypt(row['token_enc']), row['base_url'] or '', row['model'] or ''
-        env_token = {
+        env_token_map = {
             'openai': self.settings.openai_api_key or self.settings.ai_api_key,
             'openrouter': self.settings.openrouter_api_key or self.settings.ai_api_key,
             'gemini': self.settings.gemini_api_key or self.settings.ai_api_key,
@@ -327,8 +331,11 @@ class Store:
             'huggingface': self.settings.huggingface_api_key or self.settings.ai_api_key,
             'fireworks': self.settings.fireworks_api_key or self.settings.ai_api_key,
             'custom': self.settings.ai_api_key,
-        }.get(provider, self.settings.ai_api_key)
-        return provider, env_token, self.settings.ai_base_url, self.settings.ai_default_model
+            'lovable': self.settings.ai_api_key,
+            'cursor': self.settings.ai_api_key,
+            'spiko': self.settings.ai_api_key,
+        }
+        return provider, env_token_map.get(provider, self.settings.ai_api_key), self.settings.ai_base_url, self.settings.ai_default_model
 
     def list_ai_providers(self, telegram_id: int) -> list[dict[str, Any]]:
         rows = self.conn.execute('SELECT provider, base_url, model, created_at, updated_at FROM ai_tokens WHERE telegram_id=? ORDER BY provider', (telegram_id,)).fetchall()

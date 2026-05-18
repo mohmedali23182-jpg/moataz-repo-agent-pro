@@ -48,7 +48,7 @@ https://api.telegram.org/botBOT_TOKEN/setWebhook?url=PUBLIC_URL/api/telegram/web
 /create_repo my-project private --unique
 ```
 
-### فك الضغط والترتيب
+### فك الضغط والترتيب والاستبدال الكامل
 
 ```text
 /unpack
@@ -57,6 +57,20 @@ https://api.telegram.org/botBOT_TOKEN/setWebhook?url=PUBLIC_URL/api/telegram/web
 ```
 
 الافتراضي يرفع محتوى المشروع الحقيقي إلى جذر المستودع حتى تكتشفه Railway/Vercel.
+
+للاستبدال الكامل: أرسل ملف ZIP/RAR/7Z/TAR ثم رد عليه بأحد الأوامر:
+
+```text
+/replace
+/replace https://github.com/OWNER/REPO
+/replace --dry-run
+/replace --keep README.md .env.example
+/replace --target apps/web
+/replace --no-delete
+/replace --force
+```
+
+`/replace` يفك الضغط، يكتشف جذر المشروع، يرتب الملفات، يحذف الملفات القديمة داخل النطاق المطلوب، ثم يرفع المشروع الجديد بCommit واحد عبر Git Data API. استخدم `--dry-run` للمعاينة بدون حذف أو رفع.
 
 ### Agent وTerminal
 
@@ -117,62 +131,65 @@ KEY=VALUE
 - الطرفية تستخدم allowlist من `AGENT_ALLOWED_COMMANDS`.
 - حذف المتغيرات وإعادة النشر يجب أن يتم بحذر.
 
-## Ultra upgrade notes
+## Download Center و Google Drive
 
-### New Telegram commands
+تمت إضافة أوامر تحميل قانونية مباشرة للملفات وروابط APK المباشرة، بدون تجاوز Google Play أو استخدام جلسات غير رسمية.
 
-```text
-/task https://github.com/OWNER/REPO
-1. read package.json
-2. run npm run build
-3. replace README.md
-new content
-```
+### أوامر التحميل
 
 ```text
-/self_repo https://github.com/OWNER/moataz-repo-agent-pro
-/self_files
-/self_task
-1. read app/bot/telegram_bot.py
-2. replace app/...
+/download_file DIRECT_URL [filename]
+/apk DIRECT_APK_URL
+/download_to_repo DIRECT_URL path/in/repo.apk
 ```
+
+> روابط Google Play مثل `play.google.com/store/apps/details?...` صفحات متجر وليست ملفات APK مباشرة. البوت يرفض تجاوز المتجر ويطلب رابط ملف مباشر تملك حق تحميله.
+
+### Google Drive
+
+يدعم OAuth Access Token أو JSON حساب خدمة. عند استخدام حساب خدمة، شارك مجلد Drive مع بريد حساب الخدمة أولًا ثم استخدم `folder_id`.
 
 ```text
-/connect render RENDER_API_KEY
-/render_projects
-/render_set_vars SERVICE_ID
-KEY=VALUE
+/gdrive_connect ACCESS_TOKEN folder_id=FOLDER_ID
+/gdrive_status
 ```
+
+أو رد على رسالة تحتوي JSON حساب الخدمة:
 
 ```text
-/connect customapi TOKEN base_url=https://api.example.com auth=bearer
-/connector_call customapi GET /v1/projects
-/connector_call customapi POST /v1/action {"name":"value"}
+/gdrive_connect folder_id=FOLDER_ID
 ```
 
-### AI providers
-
-Supported through `/ai_connect provider TOKEN [base_url] [model]`:
+رفع ملف Telegram إلى Drive:
 
 ```text
-openai, openrouter, gemini, anthropic, groq, mistral, together,
-perplexity, deepseek, xai, cohere, huggingface, fireworks, custom,
-lovable, cursor, spiko
+/gdrive_upload folder_id=FOLDER_ID email=user@example.com
 ```
 
-### Optional Railway variables
+تحميل رابط مباشر ورفعه إلى Drive:
 
-```env
-BOT_REPO_URL=
-ANTHROPIC_API_KEY=
-GROQ_API_KEY=
-MISTRAL_API_KEY=
-TOGETHER_API_KEY=
-PERPLEXITY_API_KEY=
-DEEPSEEK_API_KEY=
-XAI_API_KEY=
-COHERE_API_KEY=
-HUGGINGFACE_API_KEY=
-FIREWORKS_API_KEY=
-RENDER_API_KEY=
+```text
+/download_to_gdrive DIRECT_URL folder_id=FOLDER_ID email=user@example.com
+```
+
+## AI Gateway الموسع
+
+يدعم OpenAI-compatible providers إضافة إلى Gemini وAnthropic وCohere:
+
+```text
+/ai_connect openrouter TOKEN
+/ai_connect openai TOKEN
+/ai_connect gemini TOKEN
+/ai_connect anthropic TOKEN
+/ai_connect groq TOKEN
+/ai_connect mistral TOKEN
+/ai_connect together TOKEN
+/ai_connect perplexity TOKEN
+/ai_connect deepseek TOKEN
+/ai_connect xai TOKEN
+/ai_connect cohere TOKEN
+/ai_connect huggingface TOKEN
+/ai_connect fireworks TOKEN
+/ai_connect custom TOKEN https://api.example.com/v1/chat/completions model-name
+/ask_ai openrouter حلل هذا الخطأ
 ```

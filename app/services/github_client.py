@@ -54,16 +54,6 @@ class GitHubClient:
             r = await client.request(method, GITHUB_API + path, headers=self.headers, **kwargs)
         if r.status_code >= 400:
             detail = r.text[:1200]
-            if r.status_code == 404 and '/contents/' in path:
-                raise GitHubError(
-                    'GitHub API 404 أثناء قراءة/كتابة ملف. غالبًا التوكن لا يملك صلاحية Contents على هذا المستودع، '
-                    'أو أن المستودع/الفرع غير صحيح. نفّذ /current_repo ثم /ls لاختبار الوصول. التفاصيل: ' + detail
-                )
-            if r.status_code == 404 and path.startswith('/repos/'):
-                raise GitHubError(
-                    'GitHub API 404. المستودع غير موجود بالنسبة لهذا التوكن أو لا يملك صلاحية عليه. '
-                    'استخدم /switch_repo برابط صحيح وتأكد من صلاحيات التوكن. التفاصيل: ' + detail
-                )
             if r.status_code == 422 and 'name already exists' in detail:
                 raise GitHubError('اسم المستودع موجود مسبقًا في هذا الحساب. اختر اسمًا آخر أو استخدم خيار --unique لإنشاء اسم تلقائي.')
             raise GitHubError(f'GitHub API error {r.status_code}: {detail}')
@@ -136,7 +126,7 @@ class GitHubClient:
         try:
             return await self.request('POST', '/user/repos', json=payload)
         except GitHubError as e:
-            if not auto_unique or not any(x in str(e).lower() for x in ['موجود مسبق', 'name already exists', 'repository creation failed']):
+            if not auto_unique or 'موجود مسبقًا' not in str(e):
                 raise
             viewer = await self.viewer()
             login = viewer.get('login', '')
@@ -229,6 +219,99 @@ class GitHubClient:
                     return '\n\n'.join(texts)
             except Exception:
                 return raw.decode('utf-8', errors='replace')
+
+
+    async def get_branch_ref(self, owner: str, repo: str, branch: str) -> dict[str, Any]:
+        return await self.request('GET', f'/repos/{owner}/{repo}/git/ref/heads/{branch}')
+
+    async def get_commit_object(self, owner: str, repo: str, commit_sha: str) -> dict[str, Any]:
+        return await self.request('GET', f'/repos/{owner}/{repo}/git/commits/{commit_sha}')
+
+    async def get_tree_recursive(self, owner: str, repo: str, tree_sha: str) -> dict[str, Any]:
+        return await self.request('GET', f'/repos/{owner}/{repo}/git/trees/{tree_sha}?recursive=1')
+
+    async def list_repo_files(self, owner: str, repo: str, branch: str = 'main') -> list[str]:
+        """Return every file path in the branch using the Git tree API.
+
+        This is more reliable for bulk operations than walking the Contents API directory by directory.
+        """
+        ref = await self.get_branch_ref(owner, repo, branch)
+        commit_sha = ref['object']['sha']
+        commit = await self.get_commit_object(owner, repo, commit_sha)
+        tree_sha = commit['tree']['sha']
+        tree = await self.get_tree_recursive(owner, repo, tree_sha)
+        if tree.get('truncated'):
+            raise GitHubError('شجرة المستودع كبيرة جدًا وتم قطعها من GitHub API. استخدم /term أو قسّم العملية.')
+        return sorted(item['path'] for item in tree.get('tree', []) if item.get('type') == 'blob')
+
+    async def create_blob(self, owner: str, repo: str, content: bytes | str) -> dict[str, Any]:
+        if isinstance(content, str):
+            raw = content.encode('utf-8')
+        else:
+            raw = content
+        return await self.request(
+            'POST',
+            f'/repos/{owner}/{repo}/git/blobs',
+            json={'content': base64.b64encode(raw).decode(), 'encoding': 'base64'},
+        )
+
+    async def create_tree(self, owner: str, repo: str, base_tree: str, tree: list[dict[str, Any]]) -> dict[str, Any]:
+        return await self.request('POST', f'/repos/{owner}/{repo}/git/trees', json={'base_tree': base_tree, 'tree': tree})
+
+    async def create_commit_object(self, owner: str, repo: str, message: str, tree_sha: str, parents: list[str]) -> dict[str, Any]:
+        return await self.request(
+            'POST',
+            f'/repos/{owner}/{repo}/git/commits',
+            json={'message': message, 'tree': tree_sha, 'parents': parents},
+        )
+
+    async def update_branch_ref(self, owner: str, repo: str, branch: str, commit_sha: str, force: bool = False) -> dict[str, Any]:
+        return await self.request(
+            'PATCH',
+            f'/repos/{owner}/{repo}/git/refs/heads/{branch}',
+            json={'sha': commit_sha, 'force': force},
+        )
+
+    async def replace_files_atomic(
+        self,
+        owner: str,
+        repo: str,
+        branch: str,
+        upload_files: dict[str, bytes | str],
+        delete_paths: list[str],
+        message: str,
+    ) -> dict[str, Any]:
+        """Replace many files in one Git commit using Git Data API.
+
+        This avoids creating a separate commit for every file and makes /replace predictable.
+        Requires Contents: Read and write on fine-grained PATs.
+        """
+        if not upload_files and not delete_paths:
+            raise GitHubError('لا توجد تغييرات لتنفيذها.')
+        ref = await self.get_branch_ref(owner, repo, branch)
+        parent_sha = ref['object']['sha']
+        parent_commit = await self.get_commit_object(owner, repo, parent_sha)
+        base_tree = parent_commit['tree']['sha']
+
+        tree_entries: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for path in sorted(set(delete_paths)):
+            clean = path.strip('/')
+            if clean and clean not in seen:
+                tree_entries.append({'path': clean, 'mode': '100644', 'type': 'blob', 'sha': None})
+                seen.add(clean)
+
+        for path, content in sorted(upload_files.items()):
+            clean = path.strip('/')
+            if not clean:
+                continue
+            blob = await self.create_blob(owner, repo, content)
+            tree_entries.append({'path': clean, 'mode': '100644', 'type': 'blob', 'sha': blob['sha']})
+
+        new_tree = await self.create_tree(owner, repo, base_tree, tree_entries)
+        commit = await self.create_commit_object(owner, repo, message, new_tree['sha'], [parent_sha])
+        await self.update_branch_ref(owner, repo, branch, commit['sha'], force=False)
+        return commit
 
     async def create_codespace(self, owner: str, repo: str, ref: str = 'main', machine: str | None = None) -> dict[str, Any]:
         payload: dict[str, Any] = {'ref': ref}

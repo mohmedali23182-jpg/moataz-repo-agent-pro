@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     netlify_auth_token: str = Field(default='', alias='NETLIFY_AUTH_TOKEN')
     fly_api_token: str = Field(default='', alias='FLY_API_TOKEN')
     replit_token: str = Field(default='', alias='REPLIT_TOKEN')
+    google_drive_token: str = Field(default='', alias='GOOGLE_DRIVE_TOKEN')
+    google_drive_folder_id: str = Field(default='', alias='GOOGLE_DRIVE_FOLDER_ID')
     connector_api_token: str = Field(default='', alias='CONNECTOR_API_TOKEN')
 
     # AI gateway. Can be configured via Railway or dynamically via /ai_connect.
@@ -82,7 +84,9 @@ class Settings(BaseSettings):
     cohere_api_key: str = Field(default='', alias='COHERE_API_KEY')
     huggingface_api_key: str = Field(default='', alias='HUGGINGFACE_API_KEY')
     fireworks_api_key: str = Field(default='', alias='FIREWORKS_API_KEY')
-    bot_repo_url: str = Field(default='', alias='BOT_REPO_URL')
+
+    # Download center. Direct downloads only; Google Play pages are reported, not bypassed.
+    download_allow_html: bool = Field(default=False, alias='DOWNLOAD_ALLOW_HTML')
 
     log_level: str = Field(default='INFO', alias='LOG_LEVEL')
 

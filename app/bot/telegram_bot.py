@@ -20,10 +20,12 @@ from app.services.store import Store
 from app.services.supabase_client import SupabaseClient, SupabaseSqlClient
 from app.services.repo_agent import apply_instruction, install_workflow
 from app.services.actions_runner import run_agent_command, validate_command
-from app.services.task_runner import execute_task_plan
 from app.services.connectors.base import parse_env_text, mask_secret
 from app.services.connectors.registry import build_connector
 from app.services.ai.gateway import AIGateway
+from app.services.downloads import download_direct_url, android_package_report, classify_url
+from app.services.google_drive import GoogleDriveClient
+from app.services.repo_replacer import parse_replace_options, replace_repository_from_archive
 
 router = Router()
 store = Store()
@@ -37,63 +39,19 @@ def is_owner(user_id: int) -> bool:
 
 def menu() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text='🧭 البدء السريع', callback_data='nav_start'), InlineKeyboardButton(text='📌 المستودع الحالي', callback_data='cmd_current_repo')],
-        [InlineKeyboardButton(text='🐙 GitHub', callback_data='nav_github'), InlineKeyboardButton(text='📂 الملفات', callback_data='nav_files')],
-        [InlineKeyboardButton(text='🤖 Agent / مهام', callback_data='nav_agent'), InlineKeyboardButton(text='💻 Terminal', callback_data='nav_terminal')],
-        [InlineKeyboardButton(text='🌐 المنصات', callback_data='nav_connectors'), InlineKeyboardButton(text='🧠 AI Gateway', callback_data='nav_ai')],
-        [InlineKeyboardButton(text='🛠️ كود البوت نفسه', callback_data='nav_self'), InlineKeyboardButton(text='🧾 كل الأوامر', callback_data='help_commands')],
+        [InlineKeyboardButton(text='🔗 ربط مستودع', callback_data='help_repo'), InlineKeyboardButton(text='🔑 ربط توكن', callback_data='help_token')],
+        [InlineKeyboardButton(text='📂 الملفات', callback_data='cmd_ls'), InlineKeyboardButton(text='👤 الحساب', callback_data='cmd_info')],
+        [InlineKeyboardButton(text='🔌 الاتصالات', callback_data='cmd_connections'), InlineKeyboardButton(text='📌 الريبو الحالي', callback_data='cmd_current_repo')],
+        [InlineKeyboardButton(text='🆕 إنشاء Repo', callback_data='help_create_repo'), InlineKeyboardButton(text='🌿 إنشاء Branch', callback_data='help_branch')],
+        [InlineKeyboardButton(text='📦 فك ضغط ورفع', callback_data='help_unpack'), InlineKeyboardButton(text='♻️ استبدال Repo', callback_data='help_replace')],
+        [InlineKeyboardButton(text='🚀 ترتيب مشروع', callback_data='help_normalize')],
+        [InlineKeyboardButton(text='⬆️ رفع ملف', callback_data='help_upload')],
+        [InlineKeyboardButton(text='🧠 Supabase', callback_data='help_supabase'), InlineKeyboardButton(text='🧾 الأوامر', callback_data='help_commands')],
+        [InlineKeyboardButton(text='🤖 Agent', callback_data='help_agent'), InlineKeyboardButton(text='💻 Terminal', callback_data='help_terminal')],
+        [InlineKeyboardButton(text='🌐 Connectors', callback_data='help_connectors'), InlineKeyboardButton(text='🧠 AI Gateway', callback_data='help_ai')],
+        [InlineKeyboardButton(text='📥 Download Center', callback_data='help_downloads'), InlineKeyboardButton(text='☁️ Google Drive', callback_data='help_gdrive')],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def submenu(name: str) -> InlineKeyboardMarkup:
-    back = InlineKeyboardButton(text='⬅️ رجوع للقائمة', callback_data='nav_home')
-    menus = {
-        'github': [
-            [InlineKeyboardButton(text='🔑 ربط توكن', callback_data='help_token'), InlineKeyboardButton(text='🔗 ربط Repo', callback_data='help_repo')],
-            [InlineKeyboardButton(text='👤 الحساب', callback_data='cmd_info'), InlineKeyboardButton(text='🔌 الاتصالات', callback_data='cmd_connections')],
-            [InlineKeyboardButton(text='📚 المستودعات', callback_data='help_repos'), InlineKeyboardButton(text='🆕 إنشاء Repo', callback_data='help_create_repo')],
-            [back],
-        ],
-        'files': [
-            [InlineKeyboardButton(text='📂 عرض الملفات', callback_data='cmd_ls'), InlineKeyboardButton(text='📖 قراءة ملف', callback_data='help_read')],
-            [InlineKeyboardButton(text='✍️ كتابة ملف', callback_data='help_write'), InlineKeyboardButton(text='🗑️ حذف ملف', callback_data='help_delete')],
-            [InlineKeyboardButton(text='📦 فك ضغط ورفع', callback_data='help_unpack'), InlineKeyboardButton(text='🚀 ترتيب مشروع', callback_data='help_normalize')],
-            [back],
-        ],
-        'agent': [
-            [InlineKeyboardButton(text='🤖 تعديل ذكي', callback_data='help_agent'), InlineKeyboardButton(text='🧭 مهمة متعددة', callback_data='help_task')],
-            [InlineKeyboardButton(text='🔎 تحليل Repo', callback_data='help_analyze'), InlineKeyboardButton(text='📌 الريبو الحالي', callback_data='cmd_current_repo')],
-            [back],
-        ],
-        'terminal': [
-            [InlineKeyboardButton(text='🧩 تثبيت Workflow', callback_data='help_terminal'), InlineKeyboardButton(text='▶️ تشغيل أمر', callback_data='help_terminal_run')],
-            [InlineKeyboardButton(text='✅ موافقة', callback_data='help_approve'), InlineKeyboardButton(text='❌ إلغاء', callback_data='help_cancel')],
-            [back],
-        ],
-        'connectors': [
-            [InlineKeyboardButton(text='🚆 Railway', callback_data='help_railway'), InlineKeyboardButton(text='▲ Vercel', callback_data='help_vercel')],
-            [InlineKeyboardButton(text='🟣 Render', callback_data='help_render'), InlineKeyboardButton(text='🔌 API عام', callback_data='help_connector_call')],
-            [InlineKeyboardButton(text='📋 المتصل', callback_data='help_connectors'), InlineKeyboardButton(text='🔌 فصل', callback_data='help_disconnect_connector')],
-            [back],
-        ],
-        'ai': [
-            [InlineKeyboardButton(text='🧠 ربط AI', callback_data='help_ai'), InlineKeyboardButton(text='💬 اسأل AI', callback_data='help_ask_ai')],
-            [InlineKeyboardButton(text='📋 مزودات AI', callback_data='help_ai_status')],
-            [back],
-        ],
-        'self': [
-            [InlineKeyboardButton(text='🔧 ربط ريبو البوت', callback_data='help_self_repo'), InlineKeyboardButton(text='📂 ملفات البوت', callback_data='help_self_files')],
-            [InlineKeyboardButton(text='🧭 تعديل البوت كمهمة', callback_data='help_self_task'), InlineKeyboardButton(text='🤖 تعديل سريع', callback_data='help_self_agent')],
-            [back],
-        ],
-        'start': [
-            [InlineKeyboardButton(text='1️⃣ /token', callback_data='help_token'), InlineKeyboardButton(text='2️⃣ /switch_repo', callback_data='help_repo')],
-            [InlineKeyboardButton(text='3️⃣ /ls', callback_data='cmd_ls'), InlineKeyboardButton(text='4️⃣ /agent', callback_data='help_agent')],
-            [back],
-        ],
-    }
-    return InlineKeyboardMarkup(inline_keyboard=menus.get(name, [[back]]))
 
 
 def help_text() -> str:
@@ -520,6 +478,68 @@ async def unpack(message: Message, bot: Bot):
         await send_error(message, e)
 
 
+async def _replace_repo_from_archive(message: Message, bot: Bot, raw_args: str) -> None:
+    src = await _download_telegram_file(bot, message)
+    repo_value, flags_text = parse_repo_and_body('/replace ' + raw_args, '/replace')
+    # parse_repo_and_body treats any owner/repo as repo. For raw flags without repo it returns None.
+    options = parse_replace_options(flags_text if repo_value else raw_args)
+    client, user = get_client_for(message)
+    target_repo = repo_value or user.get('repo')
+    if not target_repo:
+        raise GitHubError('لا يوجد مستودع حالي. استخدم /switch_repo https://github.com/OWNER/REPO أو أضف الرابط بعد /replace.')
+    owner, repo = parse_repo(target_repo)
+    branch = user.get('branch') or settings.github_default_branch
+    progress = Progress(message, 'استبدال محتوى المستودع')
+    await progress.start()
+    await progress(f'📌 الهدف: {owner}/{repo}:{branch}')
+    result = await replace_repository_from_archive(
+        client=client,
+        owner=owner,
+        repo=repo,
+        branch=branch,
+        archive_path=src,
+        work_parent=src.parent,
+        options=options,
+        progress=progress,
+    )
+    plan = result.plan
+    await message.answer(plan.telegram_text()[:3900])
+    if result.dry_run:
+        await message.answer('🧪 Dry Run فقط. لم يتم حذف أو رفع أي ملف. للتنفيذ استخدم <code>/replace --force</code> أو بدون <code>--dry-run</code>.')
+        return
+    await message.answer(
+        '✅ <b>تم استبدال محتوى المستودع بنجاح</b>\n'
+        f'المستودع: <code>{html.escape(owner + "/" + repo)}</code>\n'
+        f'الفرع: <code>{html.escape(branch)}</code>\n'
+        f'تم رفع/استبدال: <b>{result.uploaded_count}</b> ملف\n'
+        f'تم حذف: <b>{result.deleted_count}</b> ملف\n'
+        f'Commit: <code>{html.escape(str(result.commit_sha or ""))}</code>\n'
+        f'{html.escape(result.commit_url or "")}'
+    )
+
+
+@router.message(Command('replace'))
+async def replace_repo_cmd(message: Message, bot: Bot):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        if not (message.reply_to_message and message.reply_to_message.document) and not message.document:
+            await message.answer(
+                'استخدم الأمر بالرد على ملف مضغوط:\n'
+                '<code>/replace</code>\n'
+                '<code>/replace https://github.com/OWNER/REPO --force</code>\n'
+                '<code>/replace --dry-run</code>\n'
+                '<code>/replace --keep README.md .env.example</code>\n'
+                '<code>/replace --target apps/web</code>\n'
+                '<code>/replace --no-delete</code>'
+            )
+            return
+        raw_args = message.text.replace('/replace', '', 1).strip()
+        await _replace_repo_from_archive(message, bot, raw_args)
+    except Exception as e:
+        await send_error(message, e)
+
+
 @router.message(Command('unpack_raw'))
 async def unpack_raw(message: Message, bot: Bot):
     try:
@@ -790,6 +810,207 @@ async def supabase_sql_cmd(message: Message):
 
 
 
+
+# -------------------------
+# Download Center + Google Drive
+# -------------------------
+
+def _tmp_user_dir(uid: int) -> Path:
+    d = Path(settings.work_dir) / str(uid) / 'downloads'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _drive_client_for(uid: int) -> GoogleDriveClient:
+    token, meta = store.get_connector_token(uid, 'gdrive')
+    if not token:
+        token, meta = store.get_connector_token(uid, 'google_drive')
+    if not token:
+        raise RuntimeError('لا يوجد اتصال Google Drive. استخدم /gdrive_connect ACCESS_TOKEN أو رد على service-account-json بالأمر /gdrive_connect folder_id=...')
+    return GoogleDriveClient(token, folder_id=(meta or {}).get('folder_id', '') or settings.google_drive_folder_id)
+
+
+@router.message(Command('download_file'))
+@router.message(Command('apk'))
+async def download_file_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        cmd = '/apk' if message.text.startswith('/apk') else '/download_file'
+        body = message.text.replace(cmd, '', 1).strip()
+        if not body:
+            await message.answer('استخدم: <code>/download_file DIRECT_URL [filename]</code> أو <code>/apk DIRECT_APK_URL</code>')
+            return
+        parts = body.split(maxsplit=1)
+        url = parts[0]
+        preferred_name = parts[1].strip() if len(parts) > 1 else ''
+        progress = Progress(message, 'Download Center')
+        await progress.start()
+        await progress('🔎 فحص الرابط والمصدر...')
+        if classify_url(url) == 'google_play_listing':
+            await message.answer(
+                '⚠️ هذا رابط صفحة Google Play. لا يوجد تنزيل APK مباشر رسمي من رابط المتجر. '
+                'أرسل رابط ملف مباشر تملك حق تحميله مثل .apk/.xapk/.apks أو GitHub Release asset. '
+                'يمكن للبوت تحميل الروابط المباشرة ورفعها إلى GitHub أو Google Drive.'
+            )
+            return
+        await progress('⬇️ تحميل الملف المباشر...')
+        result = await download_direct_url(url, _tmp_user_dir(message.from_user.id), preferred_name, allow_html=settings.download_allow_html)
+        await progress('✅ اكتمل التحميل')
+        caption = f'✅ تم التحميل: <code>{html.escape(result.filename)}</code>\nالحجم: <b>{result.size_bytes/1024/1024:.2f} MB</b>'
+        if cmd == '/apk':
+            caption += '\n\n' + android_package_report(result.path)
+        await message.answer_document(FSInputFile(result.path), caption=caption[:1000])
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('download_to_repo'))
+async def download_to_repo_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        body = message.text.replace('/download_to_repo', '', 1).strip()
+        parts = body.split(maxsplit=1)
+        if not parts:
+            await message.answer('استخدم: <code>/download_to_repo DIRECT_URL path/in/repo.apk</code>')
+            return
+        url = parts[0]
+        target = parts[1].strip().strip('/') if len(parts) > 1 else ''
+        progress = Progress(message, 'تحميل ورفع إلى GitHub')
+        await progress.start()
+        await progress('⬇️ تحميل الملف...')
+        result = await download_direct_url(url, _tmp_user_dir(message.from_user.id), '', allow_html=settings.download_allow_html)
+        target = target or result.filename
+        await progress('🔐 قراءة سياق GitHub...')
+        client, _, owner, repo, branch = repo_context(message.from_user.id)
+        await progress(f'⬆️ رفع إلى {owner}/{repo}:{branch} => {target}')
+        await client.put_file(owner, repo, target, result.path.read_bytes(), branch, f'Upload downloaded file {target}')
+        await progress('✅ اكتمل')
+        await message.answer(f'✅ تم تحميل الملف ورفعه إلى GitHub: <code>{html.escape(target)}</code>')
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('gdrive_connect'))
+async def gdrive_connect_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        body = message.text.replace('/gdrive_connect', '', 1).strip()
+        token = ''
+        meta: dict = {}
+        if message.reply_to_message and message.reply_to_message.text:
+            token = message.reply_to_message.text.strip()
+            for part in body.split():
+                if part.startswith('folder_id='):
+                    meta['folder_id'] = part.split('=', 1)[1]
+        else:
+            parts = body.split()
+            if not parts:
+                await message.answer('استخدم: <code>/gdrive_connect ACCESS_TOKEN [folder_id=FOLDER_ID]</code> أو رد على JSON حساب خدمة بالأمر <code>/gdrive_connect folder_id=...</code>')
+                return
+            token = parts[0]
+            for part in parts[1:]:
+                if part.startswith('folder_id='):
+                    meta['folder_id'] = part.split('=', 1)[1]
+        store.set_connector_token(message.from_user.id, 'gdrive', token, meta)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.answer('✅ تم حفظ اتصال Google Drive مشفرًا. اختبره عبر /gdrive_status')
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('gdrive_status'))
+async def gdrive_status_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        progress = Progress(message, 'Google Drive')
+        await progress.start()
+        await progress('🔐 فحص الاتصال...')
+        data = await _drive_client_for(message.from_user.id).about()
+        user = data.get('user') or {}
+        quota = data.get('storageQuota') or {}
+        await progress('✅ الاتصال يعمل')
+        await message.answer(
+            '☁️ <b>Google Drive متصل</b>\n'
+            f"User: <code>{html.escape(user.get('emailAddress',''))}</code>\n"
+            f"Used: <code>{html.escape(str(quota.get('usage','')))}</code>"
+        )
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('gdrive_upload'))
+async def gdrive_upload_cmd(message: Message, bot: Bot):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        body = message.text.replace('/gdrive_upload', '', 1).strip()
+        folder_id = ''
+        share_email = ''
+        for part in body.split():
+            if part.startswith('email='):
+                share_email = part.split('=', 1)[1]
+            elif part.startswith('folder_id='):
+                folder_id = part.split('=', 1)[1]
+            elif '@' in part:
+                share_email = part
+            elif part:
+                folder_id = part
+        src = await _download_telegram_file(bot, message)
+        progress = Progress(message, 'رفع إلى Google Drive')
+        await progress.start()
+        await progress('☁️ رفع الملف...')
+        result = await _drive_client_for(message.from_user.id).upload_file(src, folder_id=folder_id, share_email=share_email)
+        await progress('✅ اكتمل الرفع')
+        await message.answer(
+            '✅ <b>تم رفع الملف إلى Google Drive</b>\n'
+            f'Name: <code>{html.escape(result.name)}</code>\n'
+            f'ID: <code>{html.escape(result.id)}</code>\n'
+            f'Link: {html.escape(result.web_view_link)}\n'
+            + (f'Shared with: <code>{html.escape(result.shared_with)}</code>' if result.shared_with else '')
+        )
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('download_to_gdrive'))
+async def download_to_gdrive_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        body = message.text.replace('/download_to_gdrive', '', 1).strip()
+        parts = body.split()
+        if not parts:
+            await message.answer('استخدم: <code>/download_to_gdrive DIRECT_URL [folder_id=...] [email=user@example.com]</code>')
+            return
+        url = parts[0]
+        folder_id = ''
+        share_email = ''
+        for part in parts[1:]:
+            if part.startswith('folder_id='):
+                folder_id = part.split('=',1)[1]
+            elif part.startswith('email='):
+                share_email = part.split('=',1)[1]
+            elif '@' in part:
+                share_email = part
+        progress = Progress(message, 'تحميل ثم رفع إلى Drive')
+        await progress.start()
+        await progress('⬇️ تحميل الملف...')
+        result = await download_direct_url(url, _tmp_user_dir(message.from_user.id), '', allow_html=settings.download_allow_html)
+        await progress('☁️ رفع إلى Google Drive...')
+        up = await _drive_client_for(message.from_user.id).upload_file(result.path, folder_id=folder_id, share_email=share_email)
+        await progress('✅ اكتمل')
+        await message.answer(f'✅ تم التحميل والرفع إلى Drive:\n{html.escape(up.web_view_link)}')
+    except Exception as e:
+        await send_error(message, e)
+
+
 # -------------------------
 # Platform connectors
 # -------------------------
@@ -1012,161 +1233,6 @@ async def vercel_set_vars_cmd(message: Message):
         await send_error(message, e)
 
 
-
-
-# -------------------------
-# Advanced task, self-management, and generic connector calls
-# -------------------------
-
-@router.message(Command('task'))
-async def task_cmd(message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    try:
-        repo_value, task = parse_repo_and_body(message.text, '/task')
-        if not task:
-            await message.answer('استخدم:\n<code>/task https://github.com/OWNER/REPO\n1. read package.json\n2. run npm run build\n3. replace README.md\n...</code>')
-            return
-        progress = Progress(message, 'مهمة Agent متعددة الخطوات')
-        await progress.start()
-        client, user = get_client_for(message)
-        target_repo = repo_value or user.get('repo')
-        if not target_repo:
-            raise GitHubError('حدد مستودعًا داخل الأمر أو استخدم /switch_repo أولًا.')
-        owner, repo = parse_repo(target_repo)
-        branch = user.get('branch') or settings.github_default_branch
-        await progress(f'📦 {owner}/{repo} @ {branch}')
-        result = await execute_task_plan(client, owner, repo, branch, task, workdir=settings.agent_default_workdir, progress=progress)
-        lines = [('✅' if result.ok else '❌') + ' <b>' + html.escape(result.summary) + '</b>']
-        for i, step in enumerate(result.results, 1):
-            icon = '✅' if step.ok else '❌'
-            lines.append(f'{icon} <b>Step {i}</b>: {html.escape(step.message)[:600]}')
-        await message.answer('\n'.join(lines)[:3900])
-    except Exception as e:
-        await send_error(message, e)
-
-
-@router.message(Command('self_repo'))
-async def self_repo_cmd(message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    try:
-        repo = message.text.replace('/self_repo', '', 1).strip() or settings.bot_repo_url
-        if not repo:
-            await message.answer('استخدم: <code>/self_repo https://github.com/OWNER/moataz-repo-agent-pro</code> أو ضع BOT_REPO_URL في Railway.')
-            return
-        parse_repo(repo)
-        store.set_repo(message.from_user.id, repo)
-        await message.answer('✅ تم ربط كود البوت نفسه كمستودع حالي. الآن تستطيع استخدام /self_files و /self_task و /agent لتطوير البوت من داخله.')
-    except Exception as e:
-        await send_error(message, e)
-
-
-@router.message(Command('self_files'))
-async def self_files_cmd(message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    try:
-        client, _, owner, repo, branch = repo_context(message.from_user.id)
-        data = await client.list_contents(owner, repo, '', branch)
-        lines = ['<b>🛠️ ملفات كود البوت الحالي</b>']
-        for item in data[:80]:
-            icon = '📁' if item.get('type') == 'dir' else '📄'
-            lines.append(f"{icon} <code>{html.escape(item.get('path',''))}</code>")
-        await message.answer('\n'.join(lines)[:3900])
-    except Exception as e:
-        await send_error(message, e)
-
-
-@router.message(Command('self_task'))
-async def self_task_cmd(message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    try:
-        task = message.text.replace('/self_task', '', 1).strip()
-        if not task:
-            await message.answer('استخدم بعد ربط /self_repo:\n<code>/self_task\n1. read app/bot/telegram_bot.py\n2. replace app/...</code>')
-            return
-        client, _, owner, repo, branch = repo_context(message.from_user.id)
-        progress = Progress(message, 'تطوير كود البوت نفسه')
-        await progress.start()
-        await progress('🛡️ تنفيذ داخل المستودع الحالي فقط. راجع النتيجة قبل إعادة النشر.')
-        result = await execute_task_plan(client, owner, repo, branch, task, workdir='.', progress=progress)
-        lines = [('✅' if result.ok else '❌') + ' <b>' + html.escape(result.summary) + '</b>']
-        for i, step in enumerate(result.results, 1):
-            lines.append(('✅' if step.ok else '❌') + f' Step {i}: ' + html.escape(step.message)[:700])
-        await message.answer('\n'.join(lines)[:3900])
-    except Exception as e:
-        await send_error(message, e)
-
-
-@router.message(Command('connector_call'))
-async def connector_call_cmd(message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    try:
-        # /connector_call platform GET /path {"x":1}
-        parts = message.text.split(maxsplit=4)
-        if len(parts) < 4:
-            await message.answer('استخدم: <code>/connector_call customapi GET /v1/projects</code> أو أضف JSON في النهاية.')
-            return
-        _, platform, method, path, *rest = parts
-        payload = None
-        if rest:
-            raw = rest[0].strip()
-            if raw:
-                payload = json.loads(raw)
-        connector = _connector_for(message.from_user.id, platform)
-        if not hasattr(connector, 'request'):
-            await message.answer('هذا الموصل لا يدعم connector_call العام. استخدم أوامره الخاصة.')
-            return
-        result = await connector.request(method, path, payload=payload)
-        await message.answer('<pre>' + html.escape(json.dumps(result.__dict__, ensure_ascii=False, indent=2)[:3800]) + '</pre>')
-    except Exception as e:
-        await send_error(message, e)
-
-
-@router.message(Command('render_projects'))
-async def render_projects_cmd(message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    try:
-        connector = _connector_for(message.from_user.id, 'render')
-        result = await connector.projects()
-        services = (result.data or {}).get('services', [])
-        lines = ['<b>🟣 Render Services</b>']
-        for item in services[:25]:
-            service = item.get('service') if isinstance(item, dict) else item
-            if isinstance(service, dict):
-                lines.append(f"• <code>{html.escape(service.get('id',''))}</code> — {html.escape(service.get('name',''))}")
-        await message.answer('\n'.join(lines)[:3900])
-    except Exception as e:
-        await send_error(message, e)
-
-
-@router.message(Command('render_set_vars'))
-async def render_set_vars_cmd(message: Message):
-    if not is_owner(message.from_user.id):
-        return
-    try:
-        parts = message.text.split(maxsplit=1)
-        if len(parts) < 2:
-            await message.answer('استخدم:\n<code>/render_set_vars SERVICE_ID\nKEY=VALUE</code>')
-            return
-        rest = parts[1]
-        service_id = rest.splitlines()[0].strip()
-        text = rest.split('\n', 1)[1] if '\n' in rest else ''
-        if message.reply_to_message and message.reply_to_message.text:
-            text = message.reply_to_message.text
-        variables = parse_env_text(text)
-        if not variables:
-            await message.answer('لم أجد متغيرات بصيغة KEY=VALUE.')
-            return
-        result = await _connector_for(message.from_user.id, 'render').set_variables(service_id, variables)
-        await message.answer('✅ ' + html.escape(result.message))
-    except Exception as e:
-        await send_error(message, e)
-
 # -------------------------
 # AI Gateway
 # -------------------------
@@ -1220,7 +1286,7 @@ async def ask_ai_cmd(message: Message):
             return
         provider = None
         first, _, rest = body.partition(' ')
-        if first.lower() in {'openai','openrouter','gemini','custom','lovable','cursor','spiko','anthropic','groq','mistral','together','perplexity','deepseek','xai','cohere','huggingface','fireworks'} and rest:
+        if first.lower() in {'openai','openrouter','gemini','anthropic','groq','mistral','together','perplexity','deepseek','xai','cohere','huggingface','fireworks','custom','lovable','cursor','spiko'} and rest:
             provider = first.lower()
             prompt = rest
         else:
@@ -1237,26 +1303,6 @@ async def ask_ai_cmd(message: Message):
         await send_error(message, e)
 
 
-
-@router.callback_query(F.data.startswith('nav_'))
-async def nav_callback(call: CallbackQuery):
-    name = call.data.replace('nav_', '', 1)
-    if name == 'home':
-        await call.message.answer('القائمة الرئيسية:', reply_markup=menu())
-    else:
-        titles = {
-            'start': '🧭 البدء السريع',
-            'github': '🐙 GitHub',
-            'files': '📂 إدارة الملفات',
-            'agent': '🤖 Agent والمهام',
-            'terminal': '💻 الطرفية',
-            'connectors': '🌐 موصلات المنصات',
-            'ai': '🧠 AI Gateway',
-            'self': '🛠️ إدارة كود البوت نفسه',
-        }
-        await call.message.answer(titles.get(name, 'القائمة'), reply_markup=submenu(name))
-    await call.answer()
-
 @router.callback_query(F.data.startswith('help_'))
 async def help_callback(call: CallbackQuery):
     texts = {
@@ -1265,10 +1311,11 @@ async def help_callback(call: CallbackQuery):
         'help_create_repo': 'إنشاء مستودع:\n<code>/create_repo my-project private</code> أو <code>/create_repo my-project public</code>',
         'help_branch': 'إنشاء فرع:\n<code>/new_branch feature-name</code>\nتغيير الفرع:\n<code>/branch main</code>',
         'help_unpack': 'أرسل ملف zip/rar/7z/tar ثم رد عليه:\n<code>/unpack</code>\nيرفع المشروع المرتب إلى جذر المستودع تلقائيًا. لو تريد حفظ مجلد فرعي استخدم: <code>/unpack target/folder --keep-folder</code>.',
+        'help_replace': 'استبدال كامل مرتب للمستودع: أرسل zip/rar/7z/tar ثم رد عليه: <code>/replace</code> أو <code>/replace https://github.com/OWNER/REPO --force</code>. يدعم: <code>--dry-run</code> و <code>--keep README.md .env.example</code> و <code>--target apps/web</code> و <code>--no-delete</code>.',
         'help_normalize': 'لترتيب مشروع فقط وإرسال ZIP نظيف بدون رفع إلى GitHub:\nرد على الملف بالأمر <code>/normalize</code>',
         'help_upload': 'أرسل ملفًا ثم رد عليه:\n<code>/upload path/in/repo.ext</code>',
         'help_supabase': 'قراءة جدول مصرح به:\n<code>/supabase posts 10</code>',
-        'help_commands': '<code>/connections /current_repo /switch_repo /disconnect_repo /disconnect_all /info /repos /ls /read /write /delete /upload /unpack /normalize /create_repo /new_branch /pr /supabase /agent /task /term /analyze_repo /install_workflow /codespace /connectors /connect /railway_projects /railway_set_vars /vercel_projects /render_projects /connector_call /ai_connect /ask_ai /self_repo /self_files /self_task</code>',
+        'help_commands': '<code>/connections /current_repo /switch_repo /disconnect_repo /disconnect_all /info /repos /ls /read /write /delete /upload /unpack /replace /normalize /create_repo /new_branch /pr /supabase /agent /term /analyze_repo /install_workflow /codespace /connectors /connect /railway_projects /railway_set_vars /vercel_projects /ai_connect /ask_ai /download_file /apk /download_to_repo /gdrive_connect /gdrive_upload /download_to_gdrive</code>',
         'help_agent': 'أوامر Agent:\n<code>/agent https://github.com/OWNER/REPO\nreplace app/main.py\nالمحتوى</code>\n<code>/agent ...\nmkdir app/new</code>\n<code>/analyze_repo https://github.com/OWNER/REPO</code>',
         'help_terminal': 'الطرفية تعمل عبر GitHub Actions بعد تثبيت Workflow:\n<code>/install_workflow https://github.com/OWNER/REPO</code>\nثم:\n<code>/term https://github.com/OWNER/REPO\nnpm run build</code>',
         'help_connectors': 'الموصلات:\n<code>/connect railway TOKEN</code>\n<code>/railway_projects</code>\n<code>/railway_project PROJECT_ID</code>\n<code>/railway_set_var PROJECT_ID ENV_ID SERVICE_ID KEY=VALUE</code>\n<code>/railway_set_vars PROJECT_ID ENV_ID SERVICE_ID</code> ثم ضع env في السطور التالية.\nVercel: <code>/connect vercel TOKEN</code> ثم <code>/vercel_projects</code> و <code>/vercel_set_var PROJECT production KEY=VALUE</code>',

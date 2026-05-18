@@ -18,11 +18,13 @@ from app.services.github_client import GitHubAuth, GitHubClient, GitHubError, pa
 from app.services.supabase_client import SupabaseClient, SupabaseSqlClient
 from app.services.repo_agent import apply_instruction, install_workflow
 from app.services.actions_runner import run_agent_command
-from app.services.task_runner import execute_task_plan
 from app.services.store import Store
 from app.services.connectors.base import parse_env_text
 from app.services.connectors.registry import build_connector
 from app.services.ai.gateway import AIGateway
+from app.services.downloads import download_direct_url, classify_url
+from app.services.google_drive import GoogleDriveClient
+from app.services.repo_replacer import parse_replace_options, replace_repository_from_archive, ReplaceOptions
 
 settings = get_settings()
 
@@ -158,19 +160,16 @@ class AIAskRequest(BaseModel):
     system: str = 'You are a senior software engineering agent.'
 
 
-class ConnectorCallRequest(BaseModel):
+class DownloadUrlRequest(BaseModel):
+    url: str
+    filename: str = ''
+
+
+class DriveUploadUrlRequest(BaseModel):
     telegram_id: int
-    platform: str
-    method: str
-    path: str
-    payload: dict[str, Any] | list[Any] | None = None
-    params: dict[str, Any] | None = None
-
-
-class TaskPlanRequest(RepoContext):
-    task: str
-    workdir: str = '.'
-    commit_terminal_changes: bool = False
+    url: str
+    folder_id: str = ''
+    email: str = ''
 
 
 def client_from_token(token: str | None) -> GitHubClient:
@@ -424,6 +423,52 @@ async def api_upload_archive(
     }
 
 
+@app.post('/api/github/replace-archive', dependencies=[Depends(require_agent_api)])
+async def api_replace_archive(
+    repo: str = Form(...),
+    branch: str = Form('main'),
+    token: str | None = Form(None),
+    flags: str = Form(''),
+    dry_run: bool = Form(False),
+    no_delete: bool = Form(False),
+    target_dir: str = Form(''),
+    keep: str = Form(''),
+    file: UploadFile = File(...),
+):
+    """Replace repository content from an uploaded archive using one atomic Git commit."""
+    client = client_from_token(token)
+    owner, repo_name = parse_repo(repo)
+    work = Path(settings.work_dir) / 'api-replace'
+    work.mkdir(parents=True, exist_ok=True)
+    src = work / (file.filename or 'archive.bin')
+    src.write_bytes(await file.read())
+    options = parse_replace_options(flags)
+    options.dry_run = dry_run or options.dry_run
+    options.no_delete = no_delete or options.no_delete
+    if target_dir:
+        options.target_dir = target_dir.strip('/')
+    if keep:
+        options.keep_patterns.extend([x.strip().strip('/') for x in keep.split(',') if x.strip()])
+    result = await replace_repository_from_archive(
+        client=client,
+        owner=owner,
+        repo=repo_name,
+        branch=branch,
+        archive_path=src,
+        work_parent=work,
+        options=options,
+    )
+    return {
+        'ok': result.ok,
+        'dry_run': result.dry_run,
+        'commit_sha': result.commit_sha,
+        'commit_url': result.commit_url,
+        'uploaded_count': result.uploaded_count,
+        'deleted_count': result.deleted_count,
+        'plan': result.plan.__dict__,
+    }
+
+
 @app.get('/api/supabase/{table}', dependencies=[Depends(require_admin)])
 async def api_supabase(table: str, limit: int = 20):
     return await SupabaseClient().select(
@@ -550,48 +595,6 @@ async def api_vercel_set_vars(req: VercelSetVarsRequest):
     return result.__dict__
 
 
-
-
-@app.post('/api/connectors/call', dependencies=[Depends(require_agent_api)])
-async def api_connector_call(req: ConnectorCallRequest):
-    token, meta = store.get_connector_token(req.telegram_id, req.platform)
-    connector = build_connector(req.platform, token, meta)
-    if not hasattr(connector, 'request'):
-        raise HTTPException(400, f'{req.platform} does not expose generic request().')
-    result = await connector.request(req.method, req.path, payload=req.payload, params=req.params)
-    return result.__dict__
-
-
-@app.post('/api/connectors/render/projects', dependencies=[Depends(require_agent_api)])
-async def api_render_projects(req: RepoDisconnectRequest):
-    token, meta = store.get_connector_token(req.telegram_id, 'render')
-    connector = build_connector('render', token, meta)
-    result = await connector.projects()
-    return result.__dict__
-
-
-@app.post('/api/connectors/render/set-vars', dependencies=[Depends(require_agent_api)])
-async def api_render_set_vars(req: VercelSetVarsRequest):
-    token, meta = store.get_connector_token(req.telegram_id, 'render')
-    connector = build_connector('render', token, meta)
-    variables = req.variables or parse_env_text(req.env_text)
-    if not variables:
-        raise HTTPException(400, 'No variables were provided')
-    result = await connector.set_variables(req.project, variables)
-    return result.__dict__
-
-
-@app.post('/api/agent/task', dependencies=[Depends(require_agent_api)])
-async def api_agent_task(req: TaskPlanRequest):
-    client = client_from_token(req.token)
-    owner, repo = parse_repo(req.repo)
-    result = await execute_task_plan(client, owner, repo, req.branch, req.task, req.workdir, req.commit_terminal_changes)
-    return {
-        'ok': result.ok,
-        'summary': result.summary,
-        'results': [r.__dict__ for r in result.results],
-    }
-
 @app.post('/api/ai/connect', dependencies=[Depends(require_agent_api)])
 async def api_ai_connect(req: AIConnectRequest):
     store.set_ai_token(req.telegram_id, req.provider, req.token, req.base_url, req.model)
@@ -603,6 +606,35 @@ async def api_ai_ask(req: AIAskRequest):
     provider, token, base_url, model = store.get_ai_token(req.telegram_id, req.provider)
     response = await AIGateway(provider, token, base_url, model).ask(req.prompt, req.system)
     return {'ok': True, 'provider': response.provider, 'model': response.model, 'text': response.text}
+
+
+
+@app.post('/api/download/url', dependencies=[Depends(require_agent_api)])
+async def api_download_url(req: DownloadUrlRequest):
+    if classify_url(req.url) == 'google_play_listing':
+        raise HTTPException(400, 'Google Play listing URLs are not direct APK files. Provide a lawful direct APK/XAPK/APKS URL or upload the file.')
+    work = Path(settings.work_dir) / 'api_downloads'
+    result = await download_direct_url(req.url, work, req.filename, allow_html=settings.download_allow_html)
+    return {
+        'ok': True,
+        'filename': result.filename,
+        'size_bytes': result.size_bytes,
+        'content_type': result.content_type,
+        'source_type': result.source_type,
+        'path': str(result.path),
+    }
+
+
+@app.post('/api/gdrive/upload-url', dependencies=[Depends(require_agent_api)])
+async def api_gdrive_upload_url(req: DriveUploadUrlRequest):
+    token, meta = store.get_connector_token(req.telegram_id, 'gdrive')
+    if not token:
+        token, meta = store.get_connector_token(req.telegram_id, 'google_drive')
+    if not token:
+        raise HTTPException(400, 'Google Drive connector is not configured for this telegram_id')
+    result = await download_direct_url(req.url, Path(settings.work_dir) / 'api_downloads', '', allow_html=settings.download_allow_html)
+    up = await GoogleDriveClient(token, folder_id=(meta or {}).get('folder_id', '') or settings.google_drive_folder_id).upload_file(result.path, folder_id=req.folder_id, share_email=req.email)
+    return {'ok': True, 'file': up.__dict__}
 
 
 @app.exception_handler(GitHubError)

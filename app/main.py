@@ -19,6 +19,9 @@ from app.services.supabase_client import SupabaseClient, SupabaseSqlClient
 from app.services.repo_agent import apply_instruction, install_workflow
 from app.services.actions_runner import run_agent_command
 from app.services.store import Store
+from app.services.connectors.base import parse_env_text
+from app.services.connectors.registry import build_connector
+from app.services.ai.gateway import AIGateway
 
 settings = get_settings()
 
@@ -113,6 +116,47 @@ class RepoDisconnectRequest(BaseModel):
     clear_token: bool = False
 
 
+class ConnectorSaveRequest(BaseModel):
+    telegram_id: int
+    platform: str
+    token: str
+    meta: dict[str, Any] = {}
+
+
+class RailwaySetVarsRequest(BaseModel):
+    telegram_id: int
+    project_id: str
+    environment_id: str
+    service_id: str | None = None
+    variables: dict[str, str] = {}
+    env_text: str = ''
+    replace: bool = False
+    skip_deploys: bool = False
+
+
+class VercelSetVarsRequest(BaseModel):
+    telegram_id: int
+    project: str
+    variables: dict[str, str] = {}
+    env_text: str = ''
+    target: str = 'production'
+
+
+class AIConnectRequest(BaseModel):
+    telegram_id: int
+    provider: str
+    token: str
+    base_url: str = ''
+    model: str = ''
+
+
+class AIAskRequest(BaseModel):
+    telegram_id: int
+    provider: str | None = None
+    prompt: str
+    system: str = 'You are a senior software engineering agent.'
+
+
 def client_from_token(token: str | None) -> GitHubClient:
     github_token = token or settings.github_token
 
@@ -166,6 +210,8 @@ async def health() -> dict[str, Any]:
         'supabase_enabled': SupabaseClient().enabled(),
         'supabase_sql_enabled': SupabaseSqlClient().enabled(),
         'agent_terminal_enabled': settings.agent_allow_terminal,
+        'connectors_enabled': settings.connectors_enabled,
+        'ai_gateway_default_provider': settings.ai_default_provider,
     }
 
 
@@ -435,6 +481,70 @@ async def api_repo_disconnect(req: RepoDisconnectRequest):
     else:
         store.disconnect_repo(req.telegram_id)
     return {'ok': True, 'status': store.connections_status(req.telegram_id)}
+
+
+
+
+@app.post('/api/connectors/save', dependencies=[Depends(require_agent_api)])
+async def api_connector_save(req: ConnectorSaveRequest):
+    store.set_connector_token(req.telegram_id, req.platform, req.token, req.meta)
+    return {'ok': True, 'message': f'{req.platform} connector saved'}
+
+
+@app.get('/api/connectors/list', dependencies=[Depends(require_agent_api)])
+async def api_connector_list(telegram_id: int):
+    return {'ok': True, 'connectors': store.list_connectors(telegram_id), 'ai_providers': store.list_ai_providers(telegram_id)}
+
+
+@app.post('/api/connectors/railway/projects', dependencies=[Depends(require_agent_api)])
+async def api_railway_projects(req: RepoDisconnectRequest):
+    token, meta = store.get_connector_token(req.telegram_id, 'railway')
+    connector = build_connector('railway', token, meta)
+    result = await connector.projects()
+    return result.__dict__
+
+
+@app.post('/api/connectors/railway/set-vars', dependencies=[Depends(require_agent_api)])
+async def api_railway_set_vars(req: RailwaySetVarsRequest):
+    token, meta = store.get_connector_token(req.telegram_id, 'railway')
+    connector = build_connector('railway', token, meta)
+    variables = req.variables or parse_env_text(req.env_text)
+    if not variables:
+        raise HTTPException(400, 'No variables were provided')
+    result = await connector.set_variables(req.project_id, req.environment_id, variables, req.service_id, req.replace, req.skip_deploys)
+    return result.__dict__
+
+
+@app.post('/api/connectors/vercel/projects', dependencies=[Depends(require_agent_api)])
+async def api_vercel_projects(req: RepoDisconnectRequest):
+    token, meta = store.get_connector_token(req.telegram_id, 'vercel')
+    connector = build_connector('vercel', token, meta)
+    result = await connector.projects()
+    return result.__dict__
+
+
+@app.post('/api/connectors/vercel/set-vars', dependencies=[Depends(require_agent_api)])
+async def api_vercel_set_vars(req: VercelSetVarsRequest):
+    token, meta = store.get_connector_token(req.telegram_id, 'vercel')
+    connector = build_connector('vercel', token, meta)
+    variables = req.variables or parse_env_text(req.env_text)
+    if not variables:
+        raise HTTPException(400, 'No variables were provided')
+    result = await connector.set_variables(req.project, variables, req.target)
+    return result.__dict__
+
+
+@app.post('/api/ai/connect', dependencies=[Depends(require_agent_api)])
+async def api_ai_connect(req: AIConnectRequest):
+    store.set_ai_token(req.telegram_id, req.provider, req.token, req.base_url, req.model)
+    return {'ok': True, 'message': f'{req.provider} AI provider saved'}
+
+
+@app.post('/api/ai/ask', dependencies=[Depends(require_agent_api)])
+async def api_ai_ask(req: AIAskRequest):
+    provider, token, base_url, model = store.get_ai_token(req.telegram_id, req.provider)
+    response = await AIGateway(provider, token, base_url, model).ask(req.prompt, req.system)
+    return {'ok': True, 'provider': response.provider, 'model': response.model, 'text': response.text}
 
 
 @app.exception_handler(GitHubError)

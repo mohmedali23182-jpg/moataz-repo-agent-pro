@@ -1,217 +1,118 @@
-# Moataz Repo Agent Pro
+# Moataz Repo Agent Pro Ultra
 
-بوت Telegram + Web API لإدارة مستودعات GitHub وفك ضغط المشاريع وترتيبها وتشغيل أوامر طرفية عبر GitHub Actions، مع تكامل Supabase اختياري.
+بوت Telegram + لوحة Web لإدارة مستودعات GitHub، فك ضغط المشاريع، ترتيب الجذر للنشر، تشغيل Terminal عبر GitHub Actions، وربط موصلات Railway/Vercel، وربط مزودات AI عبر مفاتيح ترسل من البوت أو من لوحة التحكم.
 
 ## التشغيل على Railway
 
-ارفع المشروع إلى GitHub ثم انشره على Railway. الخدمة تعمل عبر `Dockerfile` و `scripts/start.sh` وتستخدم متغير `PORT` تلقائيًا.
-
-اختبار الصحة:
-
-```text
-https://YOUR_DOMAIN/health
-```
-
-## متغيرات Railway الأساسية
+1. ارفع المشروع إلى GitHub.
+2. انشره على Railway من المستودع.
+3. ضع المتغيرات الأساسية:
 
 ```env
 TELEGRAM_BOT_TOKEN=
-TELEGRAM_OWNER_IDS=8549357772
-PUBLIC_URL=https://YOUR_DOMAIN.up.railway.app
+TELEGRAM_OWNER_IDS=
+PUBLIC_URL=https://your-service.up.railway.app
 TELEGRAM_WEBHOOK_SECRET=change_this_secret
-
 ADMIN_API_TOKEN=change_this_admin_token
-AGENT_API_TOKEN=change_this_external_agent_token
-
-GITHUB_TOKEN=
-GITHUB_DEFAULT_BRANCH=main
-
+AGENT_API_TOKEN=change_this_agent_token
+ENCRYPTION_KEY=change_this_long_secret_key_32_chars_or_more
 DATABASE_PATH=/tmp/agent.db
-ENCRYPTION_KEY=change_this_long_secret
 WORK_DIR=/tmp/moataz_repo_agent
-
 AGENT_ALLOW_TERMINAL=true
 AGENT_REQUIRE_APPROVAL=true
 AGENT_MAX_COMMAND_SECONDS=1200
 AGENT_ALLOWED_COMMANDS=npm,pnpm,yarn,python,pip,pytest,node,git,ls,cat,sed,grep
-AGENT_DEFAULT_WORKDIR=.
-AGENT_WORKFLOW_FILE=agent-command.yml
-
-SUPABASE_URL=
-SUPABASE_ANON_KEY=
-SUPABASE_SERVICE_ROLE_KEY=
-SUPABASE_ALLOWED_TABLES=profiles,posts,categories
-SUPABASE_ALLOW_SQL=false
-DATABASE_URL=
-DIRECT_URL=
 ```
 
-## Webhook Telegram
+4. افتح `/health` وتأكد أنه يعمل.
+5. اضبط Webhook:
 
 ```text
-https://api.telegram.org/botBOT_TOKEN/setWebhook?url=https://YOUR_DOMAIN/api/telegram/webhook/TELEGRAM_WEBHOOK_SECRET&secret_token=TELEGRAM_WEBHOOK_SECRET
+https://api.telegram.org/botBOT_TOKEN/setWebhook?url=PUBLIC_URL/api/telegram/webhook/TELEGRAM_WEBHOOK_SECRET&secret_token=TELEGRAM_WEBHOOK_SECRET
 ```
 
-والتحقق:
+## أهم أوامر Telegram
 
-```text
-https://api.telegram.org/botBOT_TOKEN/getWebhookInfo
-```
-
-## أوامر Telegram المهمة
+### GitHub
 
 ```text
 /token github_pat_xxx
-/repo https://github.com/OWNER/REPO
-/branch main
-/info
+/switch_repo https://github.com/OWNER/REPO
+/current_repo
+/connections
+/repos
 /ls
-/read path/to/file
-/write path/to/file | content
-/delete path/to/file
-/create_repo name private
-/create_repo name private --unique
+/read path
+/write path | content
+/delete path
+/create_repo my-project private --unique
 ```
 
-## أوامر Agent
-
-تعديل ملف:
+### فك الضغط والترتيب
 
 ```text
-/agent https://github.com/OWNER/REPO
+/unpack
+/unpack target/folder --keep-folder
+/normalize
+```
+
+الافتراضي يرفع محتوى المشروع الحقيقي إلى جذر المستودع حتى تكتشفه Railway/Vercel.
+
+### Agent وTerminal
+
+```text
+/analyze_repo
+/agent
 replace app/config.py
-ضع المحتوى الجديد هنا
-```
+المحتوى الجديد
 
-إنشاء مجلد:
-
-```text
-/agent https://github.com/OWNER/REPO
-mkdir app/services/new_module
-```
-
-قراءة أو تحليل ملف:
-
-```text
-/agent https://github.com/OWNER/REPO
-read app/main.py
-```
-
-تحليل مستودع:
-
-```text
-/analyze_repo https://github.com/OWNER/REPO
-```
-
-## Terminal عبر GitHub Actions
-
-ثبت Workflow الطرفية أولًا:
-
-```text
-/install_workflow https://github.com/OWNER/REPO
-```
-
-ثم نفذ أمرًا:
-
-```text
-/term https://github.com/OWNER/REPO
+/install_workflow
+/term
 npm run build
-```
-
-إذا كان `AGENT_REQUIRE_APPROVAL=true` أرسل:
-
-```text
 /approve
 ```
 
-أو:
+### Platform Connectors
+
+يمكن إرسال التوكن من Telegram ولا يلزم وضعه في Railway:
 
 ```text
-/cancel_term
+/connect railway RAILWAY_TOKEN
+/railway_projects
+/railway_project PROJECT_ID
+/railway_set_var PROJECT_ID ENV_ID SERVICE_ID KEY=VALUE
+/railway_set_vars PROJECT_ID ENV_ID SERVICE_ID
+KEY=VALUE
+KEY2=VALUE2
 ```
-
-> الطرفية هنا ليست جلسة Codespace تفاعلية مباشرة. التنفيذ يتم عبر GitHub Actions workflow_dispatch، وهو أنسب وأكثر ثباتًا للبوت. يوجد أمر `/codespace` لإنشاء أو عرض Codespaces عند توفر صلاحية التوكن.
-
-## Supabase
-
-قراءة جدول مصرح:
 
 ```text
-/supabase posts 10
+/connect vercel VERCEL_TOKEN team_id=team_xxx
+/vercel_projects
+/vercel_set_var PROJECT production KEY=VALUE
+/vercel_set_vars PROJECT production
+KEY=VALUE
 ```
 
-تنفيذ SQL على قاعدة تملكها فقط:
+### AI Gateway
 
 ```text
-/supabase_sql select now();
+/ai_connect openrouter TOKEN
+/ai_connect openai TOKEN
+/ai_connect gemini TOKEN
+/ai_connect custom TOKEN https://api.example.com/v1/chat/completions model-name
+/ask_ai openrouter حلل هذا الخطأ واقترح التصحيح
+/ai_status
 ```
 
-يتطلب:
+## لوحة الويب
 
-```env
-SUPABASE_ALLOW_SQL=true
-DIRECT_URL=postgresql://...
-```
+افتح جذر الدومين `/`، ثم استخدم `ADMIN_API_TOKEN` أو `AGENT_API_TOKEN` في خانة التوكن. اللوحة فيها تبويبات GitHub, Connectors, AI, Terminal, Output.
 
-## External Agent API
+## الأمان
 
-يمكن ربط البوت بأي منصة خارجية عبر `AGENT_API_TOKEN`.
-
-الهيدر:
-
-```text
-Authorization: Bearer AGENT_API_TOKEN
-```
-
-أو:
-
-```text
-X-Agent-Token: AGENT_API_TOKEN
-```
-
-Endpoints:
-
-```text
-POST /api/agent/apply
-POST /api/agent/analyze
-POST /api/agent/install-workflow
-POST /api/agent/term
-POST /api/supabase/sql
-```
-
-مثال:
-
-```json
-{
-  "repo": "https://github.com/OWNER/REPO",
-  "branch": "main",
-  "instruction": "mkdir app/new"
-}
-```
-
-## Ultra Agent Update
-
-This build adds:
-
-- Repo Session Manager per Telegram user.
-- `/connections`, `/current_repo`, `/switch_repo`, `/disconnect_repo`, `/disconnect_all`.
-- GitHub capability checks: viewer, visible repos, scopes when exposed by GitHub, and create-repo inference.
-- Safer archive upload: `/unpack` now normalizes and uploads the detected project root to repository root by default. Use `--keep-folder` to intentionally upload into a subfolder.
-- External API endpoints:
-  - `GET /api/connections/status?telegram_id=...`
-  - `POST /api/repo/switch`
-  - `POST /api/repo/disconnect`
-- Plain-text `ENCRYPTION_KEY` is now accepted and safely derived into a Fernet key.
-
-Recommended Railway variables:
-
-```env
-AGENT_ALLOW_TERMINAL=true
-AGENT_REQUIRE_APPROVAL=true
-AGENT_MAX_COMMAND_SECONDS=1200
-AGENT_ALLOWED_COMMANDS=npm,pnpm,yarn,python,pip,pytest,node,git,ls,cat,sed,grep
-AGENT_DEFAULT_WORKDIR=.
-AGENT_API_TOKEN=change_this_strong_token
-AGENT_WORKFLOW_FILE=agent-command.yml
-SUPABASE_ALLOW_SQL=false
-```
+- لا تطبع التوكنات في اللوجات.
+- التوكنات المرسلة من Telegram تحفظ مشفرة في SQLite.
+- نفذ الأوامر الحساسة للمالك فقط عبر `TELEGRAM_OWNER_IDS`.
+- الطرفية تستخدم allowlist من `AGENT_ALLOWED_COMMANDS`.
+- حذف المتغيرات وإعادة النشر يجب أن يتم بحذر.

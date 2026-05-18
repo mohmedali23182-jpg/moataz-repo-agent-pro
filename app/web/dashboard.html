@@ -3,97 +3,55 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Moataz Repo Agent</title>
+  <title>Moataz Repo Agent Ultra</title>
   <style>
-    :root { color-scheme: dark; --bg:#08111f; --card:rgba(255,255,255,.08); --line:rgba(255,255,255,.15); --txt:#eef6ff; --muted:#9fb2c7; --accent:#60a5fa; }
-    body{margin:0;font-family:system-ui,Tahoma,Arial;background:radial-gradient(circle at top,#12345c,#08111f 55%,#050812);color:var(--txt)}
-    .wrap{max-width:1150px;margin:auto;padding:28px}.hero{display:grid;gap:12px;margin-bottom:20px}.badge{display:inline-flex;width:max-content;border:1px solid var(--line);border-radius:999px;padding:8px 12px;color:#d7e8ff;background:rgba(255,255,255,.06)}
-    h1{font-size:34px;margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:22px;padding:18px;box-shadow:0 20px 60px rgba(0,0,0,.24);backdrop-filter:blur(14px)}
-    label{display:block;margin:10px 0 6px;color:var(--muted);font-size:14px}input,textarea,select{width:100%;box-sizing:border-box;border:1px solid var(--line);background:rgba(0,0,0,.25);color:var(--txt);border-radius:14px;padding:11px;outline:none}textarea{min-height:120px;direction:ltr;text-align:left}button{border:0;border-radius:14px;padding:11px 14px;margin-top:12px;background:linear-gradient(135deg,#38bdf8,#6366f1);color:white;font-weight:700;cursor:pointer}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.out{white-space:pre-wrap;direction:ltr;text-align:left;background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:18px;padding:14px;min-height:150px;overflow:auto}.hint{color:var(--muted);line-height:1.8}.danger{background:linear-gradient(135deg,#fb7185,#ef4444)}
+    :root{color-scheme:dark;--bg:#06101e;--card:rgba(255,255,255,.075);--line:rgba(255,255,255,.16);--txt:#eef7ff;--muted:#9fb3c8;--accent:#67e8f9;--accent2:#818cf8;--ok:#34d399;--bad:#fb7185}*{box-sizing:border-box}body{margin:0;font-family:system-ui,Tahoma,Arial;background:radial-gradient(circle at top right,#153b69,#06101e 50%,#020617);color:var(--txt)}.wrap{max-width:1280px;margin:auto;padding:24px}.hero{display:flex;gap:14px;align-items:center;justify-content:space-between;flex-wrap:wrap;margin-bottom:18px}.badge{border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.06);color:#d7efff}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:18px 0}.tab{border:1px solid var(--line);background:rgba(255,255,255,.06);color:var(--txt);border-radius:999px;padding:10px 14px;cursor:pointer}.tab.active{background:linear-gradient(135deg,#0891b2,#4f46e5)}h1{font-size:32px;margin:0}h2{margin:0 0 12px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:16px}.card{background:var(--card);border:1px solid var(--line);border-radius:24px;padding:18px;box-shadow:0 20px 70px rgba(0,0,0,.28);backdrop-filter:blur(14px)}label{display:block;margin:10px 0 6px;color:var(--muted);font-size:14px}input,textarea,select{width:100%;border:1px solid var(--line);background:rgba(0,0,0,.27);color:var(--txt);border-radius:14px;padding:11px;outline:none}textarea{min-height:120px;direction:ltr;text-align:left}button{border:0;border-radius:14px;padding:11px 14px;margin-top:12px;background:linear-gradient(135deg,#06b6d4,#6366f1);color:white;font-weight:800;cursor:pointer}.btn2{background:rgba(255,255,255,.11);border:1px solid var(--line)}.danger{background:linear-gradient(135deg,#fb7185,#ef4444)}.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}.out{white-space:pre-wrap;direction:ltr;text-align:left;background:rgba(0,0,0,.35);border:1px solid var(--line);border-radius:20px;padding:14px;min-height:230px;overflow:auto}.hint{color:var(--muted);line-height:1.8}.section{display:none}.section.active{display:block}.small{font-size:13px;color:var(--muted)}.pill{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:4px 9px;margin:2px;color:#dff6ff}.navbtns{display:flex;gap:8px;flex-wrap:wrap}.ltr{direction:ltr;text-align:left}
   </style>
 </head>
 <body>
 <div class="wrap">
   <section class="hero">
-    <span class="badge">Telegram + GitHub + Supabase Agent</span>
-    <h1>لوحة Moataz Repo Agent</h1>
-    <p class="hint">لوحة شفافة للتحكم بالمستودعات عبر API. ضع ADMIN_API_TOKEN، ثم GitHub Token أو اتركه فارغًا لاستخدام GITHUB_TOKEN من Railway.</p>
+    <div>
+      <span class="badge">Telegram + GitHub + Railway + Vercel + AI Gateway</span>
+      <h1>Moataz Repo Agent Ultra</h1>
+      <p class="hint">لوحة تحكم شفافة للربط، رفع المشاريع، دفع المتغيرات، تشغيل الطرفية، وربط مزودات AI. يمكن إدخال التوكنات من البوت أو من هذه اللوحة.</p>
+    </div>
+    <div class="navbtns"><button class="btn2" onclick="health()">Health</button><button class="btn2" onclick="status()">Status</button></div>
   </section>
 
-  <div class="grid">
-    <div class="card">
-      <h2>الإعدادات</h2>
-      <label>ADMIN_API_TOKEN</label><input id="admin" placeholder="Bearer token" type="password">
-      <label>GitHub Token اختياري</label><input id="token" placeholder="github_pat_xxx" type="password">
-      <label>Repo</label><input id="repo" placeholder="owner/repo أو رابط المستودع">
-      <label>Branch</label><input id="branch" value="main">
-      <button onclick="saveLocal()">حفظ محلي في المتصفح</button>
-    </div>
+  <div class="tabs">
+    <button class="tab active" onclick="show('core',this)">GitHub</button>
+    <button class="tab" onclick="show('connectors',this)">Connectors</button>
+    <button class="tab" onclick="show('ai',this)">AI</button>
+    <button class="tab" onclick="show('terminal',this)">Terminal</button>
+    <button class="tab" onclick="show('output',this)">Output</button>
+  </div>
 
-    <div class="card">
-      <h2>إنشاء مستودع</h2>
-      <label>اسم المستودع</label><input id="newRepo" placeholder="my-project">
-      <label>الوصف</label><input id="desc" value="Created by Moataz Repo Agent">
-      <select id="private"><option value="true">Private</option><option value="false">Public</option></select>
-      <button onclick="createRepo()">إنشاء</button>
-    </div>
-
-    <div class="card">
-      <h2>استعراض الملفات</h2>
-      <label>المسار</label><input id="listPath" placeholder="اتركه فارغًا للجذر">
-      <button onclick="listFiles()">استعراض</button>
-    </div>
-
-    <div class="card">
-      <h2>كتابة/تعديل ملف</h2>
-      <label>Path</label><input id="writePath" placeholder="src/app/page.tsx">
-      <label>Content</label><textarea id="content" placeholder="اكتب المحتوى هنا"></textarea>
-      <button onclick="writeFile()">حفظ في GitHub</button>
-    </div>
-
-    <div class="card">
-      <h2>حذف ملف</h2>
-      <label>Path</label><input id="deletePath" placeholder="old/file.txt">
-      <button class="danger" onclick="deleteFile()">حذف</button>
-    </div>
-
-    <div class="card">
-      <h2>فك ضغط ورفع</h2>
-      <label>Target folder</label><input id="targetDir" value="uploaded_archive">
-      <label><input id="normalize" type="checkbox" checked style="width:auto"> ترتيب المشروع تلقائيًا للنشر</label>
-      <label>Archive</label><input id="archive" type="file">
-      <button onclick="uploadArchive()">فك ورفع</button>
-    </div>
-
-    <div class="card">
-      <h2>Supabase</h2>
-      <label>Table</label><input id="table" placeholder="posts">
-      <label>Limit</label><input id="limit" value="10">
-      <button onclick="readSupabase()">قراءة جدول مسموح</button>
-    </div>
-
-    <div class="card">
-      <h2>الناتج</h2>
-      <div id="out" class="out">جاهز.</div>
+  <div id="core" class="section active">
+    <div class="grid">
+      <div class="card"><h2>الإعدادات</h2><label>AGENT/ADMIN TOKEN</label><input id="admin" type="password"><label>Telegram ID للجلسة</label><input id="telegramId" placeholder="8549357772"><label>GitHub Token اختياري</label><input id="token" type="password"><label>Repo</label><input id="repo" placeholder="owner/repo"><label>Branch</label><input id="branch" value="main"><button onclick="saveLocal()">حفظ محلي</button><button class="btn2" onclick="switchRepo()">تفعيل المستودع للجلسة</button></div>
+      <div class="card"><h2>إنشاء Repo</h2><label>اسم المستودع</label><input id="newRepo" placeholder="my-project"><label>الوصف</label><input id="desc" value="Created by Moataz Repo Agent"><select id="private"><option value="true">Private</option><option value="false">Public</option></select><label><input id="autoUnique" type="checkbox" checked style="width:auto"> اسم بديل تلقائي إذا كان موجودًا</label><button onclick="createRepo()">إنشاء</button></div>
+      <div class="card"><h2>استعراض/تعديل</h2><label>Path للاستعراض</label><input id="listPath"><button onclick="listFiles()">استعراض</button><label>Path للكتابة</label><input id="writePath"><label>Content</label><textarea id="content"></textarea><button onclick="writeFile()">حفظ</button></div>
+      <div class="card"><h2>فك ضغط ورفع</h2><label>Target folder فارغ = جذر الريبو</label><input id="targetDir" placeholder="اتركه فارغًا"><label><input id="normalize" type="checkbox" checked style="width:auto"> ترتيب تلقائي للنشر</label><input id="archive" type="file"><button onclick="uploadArchive()">فك ورفع</button></div>
     </div>
   </div>
+
+  <div id="connectors" class="section">
+    <div class="grid">
+      <div class="card"><h2>حفظ موصل</h2><label>Platform</label><select id="platform"><option>railway</option><option>vercel</option><option>render</option><option>netlify</option><option>fly</option><option>replit</option></select><label>Token/API Key</label><input id="platformToken" type="password"><label>Meta اختياري: team_id=... token_kind=project</label><input id="platformMeta"><button onclick="saveConnector()">حفظ الموصل</button><button class="btn2" onclick="status()">عرض الموصلات</button></div>
+      <div class="card"><h2>Railway</h2><p class="small">أدخل Project ID وEnvironment ID وService ID من Railway. استخدم shared للمتغيرات المشتركة.</p><button onclick="railwayProjects()">مشاريع Railway</button><label>Project ID</label><input id="rwProject"><label>Environment ID</label><input id="rwEnv"><label>Service ID أو shared</label><input id="rwService" value="shared"><label>ENV</label><textarea id="rwEnvText" placeholder="KEY=VALUE"></textarea><button onclick="railwaySetVars()">دفع المتغيرات</button></div>
+      <div class="card"><h2>Vercel</h2><button onclick="vercelProjects()">مشاريع Vercel</button><label>Project Name/ID</label><input id="vcProject"><label>Target</label><select id="vcTarget"><option>production</option><option>preview</option><option>development</option></select><label>ENV</label><textarea id="vcEnvText" placeholder="KEY=VALUE"></textarea><button onclick="vercelSetVars()">دفع المتغيرات</button></div>
+    </div>
+  </div>
+
+  <div id="ai" class="section"><div class="grid"><div class="card"><h2>AI Gateway</h2><label>Provider</label><select id="aiProvider"><option>openrouter</option><option>openai</option><option>gemini</option><option>custom</option><option>lovable</option><option>cursor</option><option>spiko</option></select><label>API Key</label><input id="aiToken" type="password"><label>Base URL للـ custom/OpenAI-compatible</label><input id="aiBase"><label>Model</label><input id="aiModel"><button onclick="saveAI()">حفظ مزود AI</button></div><div class="card"><h2>اسأل AI</h2><label>Prompt</label><textarea id="aiPrompt" placeholder="حلل هذا الخطأ أو اقترح تعديلًا..."></textarea><button onclick="askAI()">إرسال</button></div></div></div>
+
+  <div id="terminal" class="section"><div class="grid"><div class="card"><h2>Terminal عبر GitHub Actions</h2><label>Command</label><textarea id="termCmd" placeholder="npm run build"></textarea><label>Workdir</label><input id="workdir" value="."><button onclick="installWorkflow()">تثبيت Workflow</button><button onclick="runTerm()">تشغيل الأمر</button></div><div class="card"><h2>Agent Apply</h2><textarea id="agentInstruction" placeholder="replace app/config.py\n... أو analyze"></textarea><button onclick="agentApply()">تنفيذ</button></div></div></div>
+
+  <div id="output" class="section"><div class="card"><h2>الناتج</h2><div id="out" class="out">جاهز.</div></div></div>
 </div>
 <script>
-const $ = id => document.getElementById(id);
-function out(x){ $('out').textContent = typeof x === 'string' ? x : JSON.stringify(x,null,2); }
-function saveLocal(){ ['admin','token','repo','branch'].forEach(id=>localStorage.setItem(id,$(id).value)); out('تم الحفظ في المتصفح فقط.'); }
-['admin','token','repo','branch'].forEach(id=>{ if(localStorage.getItem(id)) $(id).value=localStorage.getItem(id); });
-async function api(path, body){
-  const r = await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+$('admin').value},body:JSON.stringify(body)});
-  const t = await r.text(); let data; try{data=JSON.parse(t)}catch{data=t} if(!r.ok) throw data; return data;
-}
-function ctx(){ return {token:$('token').value||null, repo:$('repo').value, branch:$('branch').value||'main'}; }
-async function createRepo(){ try{ out(await api('/api/github/repos',{token:$('token').value||null,name:$('newRepo').value,private:$('private').value==='true',description:$('desc').value})); }catch(e){out(e)} }
-async function listFiles(){ try{ const c=ctx(); out(await api('/api/github/list?path='+encodeURIComponent($('listPath').value),c)); }catch(e){out(e)} }
-async function writeFile(){ try{ out(await api('/api/github/write',{...ctx(),path:$('writePath').value,content:$('content').value,message:'Update from dashboard'})); }catch(e){out(e)} }
-async function deleteFile(){ try{ out(await api('/api/github/delete',{...ctx(),path:$('deletePath').value,message:'Delete from dashboard'})); }catch(e){out(e)} }
-async function uploadArchive(){ try{ const fd=new FormData(); fd.append('repo',$('repo').value); fd.append('branch',$('branch').value||'main'); fd.append('target_dir',$('targetDir').value); fd.append('token',$('token').value||''); fd.append('normalize',$('normalize').checked ? 'true' : 'false'); fd.append('file',$('archive').files[0]); const r=await fetch('/api/github/upload-archive',{method:'POST',headers:{'Authorization':'Bearer '+$('admin').value},body:fd}); const data=await r.json(); if(!r.ok) throw data; out(data); }catch(e){out(e)} }
-async function readSupabase(){ try{ const r=await fetch('/api/supabase/'+encodeURIComponent($('table').value)+'?limit='+encodeURIComponent($('limit').value),{headers:{'Authorization':'Bearer '+$('admin').value}}); const data=await r.json(); if(!r.ok) throw data; out(data); }catch(e){out(e)} }
+const $=id=>document.getElementById(id);function out(x){$('out').textContent=typeof x==='string'?x:JSON.stringify(x,null,2);show('output',document.querySelectorAll('.tab')[4])}function show(id,el){document.querySelectorAll('.section').forEach(x=>x.classList.remove('active'));$(id).classList.add('active');document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));if(el)el.classList.add('active')}function saveLocal(){['admin','telegramId','token','repo','branch'].forEach(id=>localStorage.setItem(id,$(id).value));out('saved locally')}['admin','telegramId','token','repo','branch'].forEach(id=>{if(localStorage.getItem(id))$(id).value=localStorage.getItem(id)});function headers(){return {'Content-Type':'application/json','Authorization':'Bearer '+$('admin').value}}async function post(path,body){const r=await fetch(path,{method:'POST',headers:headers(),body:JSON.stringify(body)});const t=await r.text();let d;try{d=JSON.parse(t)}catch{d=t}if(!r.ok)throw d;return d}async function get(path){const r=await fetch(path,{headers:headers()});const d=await r.json();if(!r.ok)throw d;return d}function ctx(){return {token:$('token').value||null,repo:$('repo').value,branch:$('branch').value||'main'}}async function health(){try{out(await get('/health'))}catch(e){out(e)}}async function status(){try{out(await get('/api/connectors/list?telegram_id='+encodeURIComponent($('telegramId').value)))}catch(e){out(e)}}async function switchRepo(){try{out(await post('/api/repo/switch',{telegram_id:+$('telegramId').value,repo:$('repo').value,branch:$('branch').value}))}catch(e){out(e)}}async function createRepo(){try{out(await post('/api/github/repos',{token:$('token').value||null,name:$('newRepo').value,private:$('private').value==='true',description:$('desc').value,auto_unique:$('autoUnique').checked}))}catch(e){out(e)}}async function listFiles(){try{out(await post('/api/github/list?path='+encodeURIComponent($('listPath').value),ctx()))}catch(e){out(e)}}async function writeFile(){try{out(await post('/api/github/write',{...ctx(),path:$('writePath').value,content:$('content').value,message:'Update from ultra dashboard'}))}catch(e){out(e)}}async function uploadArchive(){try{const fd=new FormData();fd.append('repo',$('repo').value);fd.append('branch',$('branch').value||'main');fd.append('target_dir',$('targetDir').value);fd.append('token',$('token').value||'');fd.append('normalize',$('normalize').checked?'true':'false');fd.append('file',$('archive').files[0]);const r=await fetch('/api/github/upload-archive',{method:'POST',headers:{'Authorization':'Bearer '+$('admin').value},body:fd});const d=await r.json();if(!r.ok)throw d;out(d)}catch(e){out(e)}}function metaObj(){const m={};($('platformMeta').value||'').split(/\s+/).forEach(x=>{if(x.includes('=')){const [k,v]=x.split('=');m[k]=v}});return m}async function saveConnector(){try{out(await post('/api/connectors/save',{telegram_id:+$('telegramId').value,platform:$('platform').value,token:$('platformToken').value,meta:metaObj()}))}catch(e){out(e)}}async function railwayProjects(){try{out(await post('/api/connectors/railway/projects',{telegram_id:+$('telegramId').value}))}catch(e){out(e)}}async function railwaySetVars(){try{out(await post('/api/connectors/railway/set-vars',{telegram_id:+$('telegramId').value,project_id:$('rwProject').value,environment_id:$('rwEnv').value,service_id:$('rwService').value==='shared'?null:$('rwService').value,env_text:$('rwEnvText').value}))}catch(e){out(e)}}async function vercelProjects(){try{out(await post('/api/connectors/vercel/projects',{telegram_id:+$('telegramId').value}))}catch(e){out(e)}}async function vercelSetVars(){try{out(await post('/api/connectors/vercel/set-vars',{telegram_id:+$('telegramId').value,project:$('vcProject').value,target:$('vcTarget').value,env_text:$('vcEnvText').value}))}catch(e){out(e)}}async function saveAI(){try{out(await post('/api/ai/connect',{telegram_id:+$('telegramId').value,provider:$('aiProvider').value,token:$('aiToken').value,base_url:$('aiBase').value,model:$('aiModel').value}))}catch(e){out(e)}}async function askAI(){try{out(await post('/api/ai/ask',{telegram_id:+$('telegramId').value,provider:$('aiProvider').value,prompt:$('aiPrompt').value}))}catch(e){out(e)}}async function installWorkflow(){try{out(await post('/api/agent/install-workflow',ctx()))}catch(e){out(e)}}async function runTerm(){try{out(await post('/api/agent/term',{...ctx(),command:$('termCmd').value,workdir:$('workdir').value}))}catch(e){out(e)}}async function agentApply(){try{out(await post('/api/agent/apply',{...ctx(),instruction:$('agentInstruction').value}))}catch(e){out(e)}}
 </script>
 </body>
 </html>

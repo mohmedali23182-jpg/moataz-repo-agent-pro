@@ -20,6 +20,9 @@ from app.services.store import Store
 from app.services.supabase_client import SupabaseClient, SupabaseSqlClient
 from app.services.repo_agent import apply_instruction, install_workflow
 from app.services.actions_runner import run_agent_command, validate_command
+from app.services.connectors.base import parse_env_text, mask_secret
+from app.services.connectors.registry import build_connector
+from app.services.ai.gateway import AIGateway
 
 router = Router()
 store = Store()
@@ -41,6 +44,7 @@ def menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='⬆️ رفع ملف', callback_data='help_upload')],
         [InlineKeyboardButton(text='🧠 Supabase', callback_data='help_supabase'), InlineKeyboardButton(text='🧾 الأوامر', callback_data='help_commands')],
         [InlineKeyboardButton(text='🤖 Agent', callback_data='help_agent'), InlineKeyboardButton(text='💻 Terminal', callback_data='help_terminal')],
+        [InlineKeyboardButton(text='🌐 Connectors', callback_data='help_connectors'), InlineKeyboardButton(text='🧠 AI Gateway', callback_data='help_ai')],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -737,6 +741,300 @@ async def supabase_sql_cmd(message: Message):
         await send_error(message, e)
 
 
+
+
+# -------------------------
+# Platform connectors
+# -------------------------
+
+def _connector_for(uid: int, platform: str):
+    token, meta = store.get_connector_token(uid, platform)
+    if not token:
+        raise RuntimeError(f'لا يوجد توكن محفوظ لمنصة {platform}. استخدم /connect {platform} TOKEN')
+    return build_connector(platform, token, meta)
+
+
+@router.message(Command('connectors'))
+async def connectors_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    items = store.list_connectors(message.from_user.id)
+    ai_items = store.list_ai_providers(message.from_user.id)
+    lines = ['<b>🌐 الموصلات المتصلة</b>']
+    if not items:
+        lines.append('لا توجد موصلات. استخدم: <code>/connect railway TOKEN</code> أو <code>/connect vercel TOKEN</code>')
+    for item in items:
+        lines.append(f"• <b>{html.escape(item.get('platform',''))}</b> — {html.escape(item.get('source','user'))}")
+    lines.append('\n<b>🧠 مزودات الذكاء</b>')
+    if not ai_items:
+        lines.append('لا توجد مفاتيح AI. استخدم: <code>/ai_connect openrouter TOKEN</code>')
+    for item in ai_items:
+        lines.append(f"• <b>{html.escape(item.get('provider',''))}</b> — {html.escape(item.get('model') or 'default')} — {html.escape(item.get('source','user'))}")
+    await message.answer('\n'.join(lines)[:3900])
+
+
+@router.message(Command('connect'))
+async def connect_platform_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        parts = message.text.split(maxsplit=3)
+        if len(parts) < 3:
+            await message.answer('استخدم: <code>/connect railway RAILWAY_TOKEN</code> أو <code>/connect vercel VERCEL_TOKEN</code>')
+            return
+        platform, token = parts[1].lower(), parts[2]
+        meta = {}
+        if len(parts) == 4:
+            # optional JSON meta or key=value pairs. Example: team_id=team_x token_kind=project
+            rest = parts[3]
+            for bit in rest.split():
+                if '=' in bit:
+                    k, v = bit.split('=', 1)
+                    meta[k.strip()] = v.strip()
+        store.set_connector_token(message.from_user.id, platform, token, meta)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.answer(f'✅ تم حفظ موصل <b>{html.escape(platform)}</b> مشفرًا. التوكن: <code>{html.escape(mask_secret(token))}</code>')
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('disconnect_connector'))
+async def disconnect_connector_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    platform = message.text.replace('/disconnect_connector', '', 1).strip().lower()
+    if not platform:
+        await message.answer('استخدم: <code>/disconnect_connector railway</code>')
+        return
+    store.delete_connector_token(message.from_user.id, platform)
+    await message.answer(f'✅ تم فصل موصل {html.escape(platform)} لهذا المستخدم.')
+
+
+@router.message(Command('railway_projects'))
+async def railway_projects_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        progress = Progress(message, 'Railway Connector')
+        await progress.start()
+        await progress('🔐 اختبار التوكن وقراءة المشاريع...')
+        connector = _connector_for(message.from_user.id, 'railway')
+        result = await connector.projects()
+        projects = (result.data or {}).get('projects', [])
+        lines = ['<b>🚆 Railway Projects</b>']
+        for p in projects[:25]:
+            lines.append(f"• <code>{html.escape(p.get('id',''))}</code> — {html.escape(p.get('name',''))}")
+        await progress('✅ اكتمل')
+        await message.answer('\n'.join(lines)[:3900])
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('railway_project'))
+async def railway_project_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    project_id = message.text.replace('/railway_project', '', 1).strip()
+    if not project_id:
+        await message.answer('استخدم: <code>/railway_project PROJECT_ID</code>')
+        return
+    try:
+        result = await _connector_for(message.from_user.id, 'railway').project(project_id)
+        project = (result.data or {}).get('project') or {}
+        lines = [f"<b>🚆 {html.escape(project.get('name','Railway Project'))}</b>"]
+        lines.append('\n<b>Environments</b>')
+        for edge in (((project.get('environments') or {}).get('edges')) or []):
+            n = edge.get('node') or {}
+            lines.append(f"• <code>{html.escape(n.get('id',''))}</code> — {html.escape(n.get('name',''))}")
+        lines.append('\n<b>Services</b>')
+        for edge in (((project.get('services') or {}).get('edges')) or []):
+            n = edge.get('node') or {}
+            lines.append(f"• <code>{html.escape(n.get('id',''))}</code> — {html.escape(n.get('name',''))}")
+        await message.answer('\n'.join(lines)[:3900])
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('railway_set_var'))
+async def railway_set_var_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        # /railway_set_var PROJECT_ID ENV_ID SERVICE_ID KEY=VALUE
+        parts = message.text.split(maxsplit=4)
+        if len(parts) < 5 or '=' not in parts[4]:
+            await message.answer('استخدم: <code>/railway_set_var PROJECT_ID ENV_ID SERVICE_ID KEY=VALUE</code>\nاكتب SERVICE_ID = shared للمتغيرات المشتركة.')
+            return
+        _, project_id, env_id, service_id, pair = parts
+        key, value = pair.split('=', 1)
+        service = None if service_id.lower() in {'shared', 'none', '-'} else service_id
+        progress = Progress(message, 'دفع متغير Railway')
+        await progress.start()
+        await progress(f'🔐 رفع {html.escape(key)}...')
+        result = await _connector_for(message.from_user.id, 'railway').set_variable(project_id, env_id, key, value, service_id=service)
+        await progress('✅ اكتمل')
+        await message.answer(f'✅ {html.escape(result.message)}')
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('railway_set_vars'))
+async def railway_set_vars_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        parts = message.text.split(maxsplit=3)
+        if len(parts) < 4:
+            await message.answer('استخدم وردّ على ملف/رسالة env أو اكتب بعد السطر الأول:\n<code>/railway_set_vars PROJECT_ID ENV_ID SERVICE_ID\nKEY=VALUE</code>')
+            return
+        _, project_id, env_id, service_id = parts[:4]
+        text = message.text.split('\n', 1)[1] if '\n' in message.text else ''
+        if message.reply_to_message and message.reply_to_message.text:
+            text = message.reply_to_message.text
+        variables = parse_env_text(text)
+        if not variables:
+            await message.answer('لم أجد متغيرات بصيغة KEY=VALUE.')
+            return
+        service = None if service_id.lower() in {'shared', 'none', '-'} else service_id
+        progress = Progress(message, 'دفع متغيرات Railway')
+        await progress.start()
+        await progress(f'🔐 رفع {len(variables)} متغير...')
+        result = await _connector_for(message.from_user.id, 'railway').set_variables(project_id, env_id, variables, service_id=service)
+        await progress('✅ اكتمل')
+        await message.answer(f'✅ {html.escape(result.message)}')
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('vercel_projects'))
+async def vercel_projects_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        result = await _connector_for(message.from_user.id, 'vercel').projects()
+        projects = (result.data or {}).get('projects', [])
+        lines = ['<b>▲ Vercel Projects</b>']
+        for p in projects[:30]:
+            lines.append(f"• <code>{html.escape(p.get('id',''))}</code> — {html.escape(p.get('name',''))}")
+        await message.answer('\n'.join(lines)[:3900])
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('vercel_set_var'))
+async def vercel_set_var_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        # /vercel_set_var PROJECT production KEY=VALUE
+        parts = message.text.split(maxsplit=3)
+        if len(parts) < 4 or '=' not in parts[3]:
+            await message.answer('استخدم: <code>/vercel_set_var PROJECT production KEY=VALUE</code>')
+            return
+        _, project, target, pair = parts
+        key, value = pair.split('=', 1)
+        result = await _connector_for(message.from_user.id, 'vercel').set_variable(project, key, value, target=target)
+        await message.answer(f'✅ {html.escape(result.message)}')
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('vercel_set_vars'))
+async def vercel_set_vars_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        parts = message.text.split(maxsplit=2)
+        if len(parts) < 3:
+            await message.answer('استخدم:\n<code>/vercel_set_vars PROJECT production\nKEY=VALUE</code>')
+            return
+        _, project, target = parts[:3]
+        text = message.text.split('\n', 1)[1] if '\n' in message.text else ''
+        if message.reply_to_message and message.reply_to_message.text:
+            text = message.reply_to_message.text
+        variables = parse_env_text(text)
+        if not variables:
+            await message.answer('لم أجد متغيرات بصيغة KEY=VALUE.')
+            return
+        result = await _connector_for(message.from_user.id, 'vercel').set_variables(project, variables, target=target)
+        await message.answer(f'✅ {html.escape(result.message)}')
+    except Exception as e:
+        await send_error(message, e)
+
+
+# -------------------------
+# AI Gateway
+# -------------------------
+
+@router.message(Command('ai_connect'))
+async def ai_connect_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        # /ai_connect provider TOKEN [base_url] [model]
+        parts = message.text.split(maxsplit=4)
+        if len(parts) < 3:
+            await message.answer('استخدم: <code>/ai_connect openrouter TOKEN</code> أو <code>/ai_connect custom TOKEN https://api.example.com/v1/chat/completions model-name</code>')
+            return
+        provider = parts[1]
+        token = parts[2]
+        base_url = parts[3] if len(parts) >= 4 else ''
+        model = parts[4] if len(parts) >= 5 else ''
+        store.set_ai_token(message.from_user.id, provider, token, base_url, model)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.answer(f'✅ تم حفظ مزود AI: <b>{html.escape(provider)}</b>')
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('ai_status'))
+async def ai_status_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    items = store.list_ai_providers(message.from_user.id)
+    if not items:
+        await message.answer('لا يوجد مزود AI. استخدم /ai_connect')
+        return
+    lines = ['<b>🧠 AI Providers</b>']
+    for item in items:
+        lines.append(f"• <code>{html.escape(item.get('provider',''))}</code> model=<code>{html.escape(item.get('model') or 'default')}</code> source={html.escape(item.get('source','user'))}")
+    await message.answer('\n'.join(lines))
+
+
+@router.message(Command('ask_ai'))
+async def ask_ai_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        body = message.text.replace('/ask_ai', '', 1).strip()
+        if not body:
+            await message.answer('استخدم: <code>/ask_ai [provider] سؤالك أو أمر التحليل</code>')
+            return
+        provider = None
+        first, _, rest = body.partition(' ')
+        if first.lower() in {'openai','openrouter','gemini','custom','lovable','cursor','spiko'} and rest:
+            provider = first.lower()
+            prompt = rest
+        else:
+            prompt = body
+        provider, token, base_url, model = store.get_ai_token(message.from_user.id, provider)
+        gateway = AIGateway(provider, token, base_url, model)
+        progress = Progress(message, 'AI Gateway')
+        await progress.start()
+        await progress(f'🧠 سؤال {provider}...')
+        res = await gateway.ask(prompt, system='You are a senior software engineering agent. Be concise, actionable, and safe.')
+        await progress('✅ اكتمل')
+        await message.answer(f'<b>{html.escape(res.provider)} / {html.escape(res.model)}</b>\n' + html.escape(res.text[:3800]))
+    except Exception as e:
+        await send_error(message, e)
+
+
 @router.callback_query(F.data.startswith('help_'))
 async def help_callback(call: CallbackQuery):
     texts = {
@@ -748,9 +1046,11 @@ async def help_callback(call: CallbackQuery):
         'help_normalize': 'لترتيب مشروع فقط وإرسال ZIP نظيف بدون رفع إلى GitHub:\nرد على الملف بالأمر <code>/normalize</code>',
         'help_upload': 'أرسل ملفًا ثم رد عليه:\n<code>/upload path/in/repo.ext</code>',
         'help_supabase': 'قراءة جدول مصرح به:\n<code>/supabase posts 10</code>',
-        'help_commands': '<code>/connections /current_repo /switch_repo /disconnect_repo /disconnect_all /info /repos /ls /read /write /delete /upload /unpack /normalize /create_repo /new_branch /pr /supabase /agent /term /analyze_repo /install_workflow /codespace</code>',
+        'help_commands': '<code>/connections /current_repo /switch_repo /disconnect_repo /disconnect_all /info /repos /ls /read /write /delete /upload /unpack /normalize /create_repo /new_branch /pr /supabase /agent /term /analyze_repo /install_workflow /codespace /connectors /connect /railway_projects /railway_set_vars /vercel_projects /ai_connect /ask_ai</code>',
         'help_agent': 'أوامر Agent:\n<code>/agent https://github.com/OWNER/REPO\nreplace app/main.py\nالمحتوى</code>\n<code>/agent ...\nmkdir app/new</code>\n<code>/analyze_repo https://github.com/OWNER/REPO</code>',
         'help_terminal': 'الطرفية تعمل عبر GitHub Actions بعد تثبيت Workflow:\n<code>/install_workflow https://github.com/OWNER/REPO</code>\nثم:\n<code>/term https://github.com/OWNER/REPO\nnpm run build</code>',
+        'help_connectors': 'الموصلات:\n<code>/connect railway TOKEN</code>\n<code>/railway_projects</code>\n<code>/railway_project PROJECT_ID</code>\n<code>/railway_set_var PROJECT_ID ENV_ID SERVICE_ID KEY=VALUE</code>\n<code>/railway_set_vars PROJECT_ID ENV_ID SERVICE_ID</code> ثم ضع env في السطور التالية.\nVercel: <code>/connect vercel TOKEN</code> ثم <code>/vercel_projects</code> و <code>/vercel_set_var PROJECT production KEY=VALUE</code>',
+        'help_ai': 'AI Gateway:\n<code>/ai_connect openrouter TOKEN</code>\n<code>/ai_connect openai TOKEN</code>\n<code>/ai_connect gemini TOKEN</code>\n<code>/ask_ai openrouter حلل هذا الخطأ...</code>\nيدعم custom OpenAI-compatible: <code>/ai_connect custom TOKEN https://api.example.com/v1/chat/completions model</code>',
     }
     await call.message.answer(texts.get(call.data, 'غير معروف'))
     await call.answer()

@@ -49,6 +49,30 @@ class Settings(BaseSettings):
     agent_default_workdir: str = Field(default='.', alias='AGENT_DEFAULT_WORKDIR')
     agent_workflow_file: str = Field(default='agent-command.yml', alias='AGENT_WORKFLOW_FILE')
 
+
+
+    # Platform connectors. Tokens may also be stored per user through Telegram commands.
+    connectors_enabled: bool = Field(default=True, alias='CONNECTORS_ENABLED')
+    connectors_require_owner: bool = Field(default=True, alias='CONNECTORS_REQUIRE_OWNER')
+    railway_api_token: str = Field(default='', alias='RAILWAY_API_TOKEN')
+    railway_token: str = Field(default='', alias='RAILWAY_TOKEN')
+    vercel_token: str = Field(default='', alias='VERCEL_TOKEN')
+    vercel_team_id: str = Field(default='', alias='VERCEL_TEAM_ID')
+    render_api_key: str = Field(default='', alias='RENDER_API_KEY')
+    netlify_auth_token: str = Field(default='', alias='NETLIFY_AUTH_TOKEN')
+    fly_api_token: str = Field(default='', alias='FLY_API_TOKEN')
+    replit_token: str = Field(default='', alias='REPLIT_TOKEN')
+    connector_api_token: str = Field(default='', alias='CONNECTOR_API_TOKEN')
+
+    # AI gateway. Can be configured via Railway or dynamically via /ai_connect.
+    ai_default_provider: str = Field(default='openrouter', alias='AI_DEFAULT_PROVIDER')
+    ai_default_model: str = Field(default='openai/gpt-4o-mini', alias='AI_DEFAULT_MODEL')
+    ai_base_url: str = Field(default='', alias='AI_BASE_URL')
+    ai_api_key: str = Field(default='', alias='AI_API_KEY')
+    openai_api_key: str = Field(default='', alias='OPENAI_API_KEY')
+    openrouter_api_key: str = Field(default='', alias='OPENROUTER_API_KEY')
+    gemini_api_key: str = Field(default='', alias='GEMINI_API_KEY')
+
     log_level: str = Field(default='INFO', alias='LOG_LEVEL')
 
     @property

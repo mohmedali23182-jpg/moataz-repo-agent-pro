@@ -72,6 +72,17 @@ class Settings(BaseSettings):
     openai_api_key: str = Field(default='', alias='OPENAI_API_KEY')
     openrouter_api_key: str = Field(default='', alias='OPENROUTER_API_KEY')
     gemini_api_key: str = Field(default='', alias='GEMINI_API_KEY')
+    anthropic_api_key: str = Field(default='', alias='ANTHROPIC_API_KEY')
+    groq_api_key: str = Field(default='', alias='GROQ_API_KEY')
+    mistral_api_key: str = Field(default='', alias='MISTRAL_API_KEY')
+    together_api_key: str = Field(default='', alias='TOGETHER_API_KEY')
+    perplexity_api_key: str = Field(default='', alias='PERPLEXITY_API_KEY')
+    deepseek_api_key: str = Field(default='', alias='DEEPSEEK_API_KEY')
+    xai_api_key: str = Field(default='', alias='XAI_API_KEY')
+    cohere_api_key: str = Field(default='', alias='COHERE_API_KEY')
+    huggingface_api_key: str = Field(default='', alias='HUGGINGFACE_API_KEY')
+    fireworks_api_key: str = Field(default='', alias='FIREWORKS_API_KEY')
+    bot_repo_url: str = Field(default='', alias='BOT_REPO_URL')
 
     log_level: str = Field(default='INFO', alias='LOG_LEVEL')
 

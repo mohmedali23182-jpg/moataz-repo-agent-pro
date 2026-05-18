@@ -18,6 +18,7 @@ from app.services.github_client import GitHubAuth, GitHubClient, GitHubError, pa
 from app.services.supabase_client import SupabaseClient, SupabaseSqlClient
 from app.services.repo_agent import apply_instruction, install_workflow
 from app.services.actions_runner import run_agent_command
+from app.services.task_runner import execute_task_plan
 from app.services.store import Store
 from app.services.connectors.base import parse_env_text
 from app.services.connectors.registry import build_connector
@@ -155,6 +156,21 @@ class AIAskRequest(BaseModel):
     provider: str | None = None
     prompt: str
     system: str = 'You are a senior software engineering agent.'
+
+
+class ConnectorCallRequest(BaseModel):
+    telegram_id: int
+    platform: str
+    method: str
+    path: str
+    payload: dict[str, Any] | list[Any] | None = None
+    params: dict[str, Any] | None = None
+
+
+class TaskPlanRequest(RepoContext):
+    task: str
+    workdir: str = '.'
+    commit_terminal_changes: bool = False
 
 
 def client_from_token(token: str | None) -> GitHubClient:
@@ -533,6 +549,48 @@ async def api_vercel_set_vars(req: VercelSetVarsRequest):
     result = await connector.set_variables(req.project, variables, req.target)
     return result.__dict__
 
+
+
+
+@app.post('/api/connectors/call', dependencies=[Depends(require_agent_api)])
+async def api_connector_call(req: ConnectorCallRequest):
+    token, meta = store.get_connector_token(req.telegram_id, req.platform)
+    connector = build_connector(req.platform, token, meta)
+    if not hasattr(connector, 'request'):
+        raise HTTPException(400, f'{req.platform} does not expose generic request().')
+    result = await connector.request(req.method, req.path, payload=req.payload, params=req.params)
+    return result.__dict__
+
+
+@app.post('/api/connectors/render/projects', dependencies=[Depends(require_agent_api)])
+async def api_render_projects(req: RepoDisconnectRequest):
+    token, meta = store.get_connector_token(req.telegram_id, 'render')
+    connector = build_connector('render', token, meta)
+    result = await connector.projects()
+    return result.__dict__
+
+
+@app.post('/api/connectors/render/set-vars', dependencies=[Depends(require_agent_api)])
+async def api_render_set_vars(req: VercelSetVarsRequest):
+    token, meta = store.get_connector_token(req.telegram_id, 'render')
+    connector = build_connector('render', token, meta)
+    variables = req.variables or parse_env_text(req.env_text)
+    if not variables:
+        raise HTTPException(400, 'No variables were provided')
+    result = await connector.set_variables(req.project, variables)
+    return result.__dict__
+
+
+@app.post('/api/agent/task', dependencies=[Depends(require_agent_api)])
+async def api_agent_task(req: TaskPlanRequest):
+    client = client_from_token(req.token)
+    owner, repo = parse_repo(req.repo)
+    result = await execute_task_plan(client, owner, repo, req.branch, req.task, req.workdir, req.commit_terminal_changes)
+    return {
+        'ok': result.ok,
+        'summary': result.summary,
+        'results': [r.__dict__ for r in result.results],
+    }
 
 @app.post('/api/ai/connect', dependencies=[Depends(require_agent_api)])
 async def api_ai_connect(req: AIConnectRequest):

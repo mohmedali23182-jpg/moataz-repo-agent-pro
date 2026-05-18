@@ -116,3 +116,63 @@ KEY=VALUE
 - نفذ الأوامر الحساسة للمالك فقط عبر `TELEGRAM_OWNER_IDS`.
 - الطرفية تستخدم allowlist من `AGENT_ALLOWED_COMMANDS`.
 - حذف المتغيرات وإعادة النشر يجب أن يتم بحذر.
+
+## Ultra upgrade notes
+
+### New Telegram commands
+
+```text
+/task https://github.com/OWNER/REPO
+1. read package.json
+2. run npm run build
+3. replace README.md
+new content
+```
+
+```text
+/self_repo https://github.com/OWNER/moataz-repo-agent-pro
+/self_files
+/self_task
+1. read app/bot/telegram_bot.py
+2. replace app/...
+```
+
+```text
+/connect render RENDER_API_KEY
+/render_projects
+/render_set_vars SERVICE_ID
+KEY=VALUE
+```
+
+```text
+/connect customapi TOKEN base_url=https://api.example.com auth=bearer
+/connector_call customapi GET /v1/projects
+/connector_call customapi POST /v1/action {"name":"value"}
+```
+
+### AI providers
+
+Supported through `/ai_connect provider TOKEN [base_url] [model]`:
+
+```text
+openai, openrouter, gemini, anthropic, groq, mistral, together,
+perplexity, deepseek, xai, cohere, huggingface, fireworks, custom,
+lovable, cursor, spiko
+```
+
+### Optional Railway variables
+
+```env
+BOT_REPO_URL=
+ANTHROPIC_API_KEY=
+GROQ_API_KEY=
+MISTRAL_API_KEY=
+TOGETHER_API_KEY=
+PERPLEXITY_API_KEY=
+DEEPSEEK_API_KEY=
+XAI_API_KEY=
+COHERE_API_KEY=
+HUGGINGFACE_API_KEY=
+FIREWORKS_API_KEY=
+RENDER_API_KEY=
+```

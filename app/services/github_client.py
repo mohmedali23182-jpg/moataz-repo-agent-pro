@@ -54,6 +54,16 @@ class GitHubClient:
             r = await client.request(method, GITHUB_API + path, headers=self.headers, **kwargs)
         if r.status_code >= 400:
             detail = r.text[:1200]
+            if r.status_code == 404 and '/contents/' in path:
+                raise GitHubError(
+                    'GitHub API 404 أثناء قراءة/كتابة ملف. غالبًا التوكن لا يملك صلاحية Contents على هذا المستودع، '
+                    'أو أن المستودع/الفرع غير صحيح. نفّذ /current_repo ثم /ls لاختبار الوصول. التفاصيل: ' + detail
+                )
+            if r.status_code == 404 and path.startswith('/repos/'):
+                raise GitHubError(
+                    'GitHub API 404. المستودع غير موجود بالنسبة لهذا التوكن أو لا يملك صلاحية عليه. '
+                    'استخدم /switch_repo برابط صحيح وتأكد من صلاحيات التوكن. التفاصيل: ' + detail
+                )
             if r.status_code == 422 and 'name already exists' in detail:
                 raise GitHubError('اسم المستودع موجود مسبقًا في هذا الحساب. اختر اسمًا آخر أو استخدم خيار --unique لإنشاء اسم تلقائي.')
             raise GitHubError(f'GitHub API error {r.status_code}: {detail}')
@@ -126,7 +136,7 @@ class GitHubClient:
         try:
             return await self.request('POST', '/user/repos', json=payload)
         except GitHubError as e:
-            if not auto_unique or 'موجود مسبقًا' not in str(e):
+            if not auto_unique or not any(x in str(e).lower() for x in ['موجود مسبق', 'name already exists', 'repository creation failed']):
                 raise
             viewer = await self.viewer()
             login = viewer.get('login', '')

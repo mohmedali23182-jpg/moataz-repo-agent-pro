@@ -316,6 +316,16 @@ class Store:
             'openai': self.settings.openai_api_key or self.settings.ai_api_key,
             'openrouter': self.settings.openrouter_api_key or self.settings.ai_api_key,
             'gemini': self.settings.gemini_api_key or self.settings.ai_api_key,
+            'anthropic': self.settings.anthropic_api_key or self.settings.ai_api_key,
+            'groq': self.settings.groq_api_key or self.settings.ai_api_key,
+            'mistral': self.settings.mistral_api_key or self.settings.ai_api_key,
+            'together': self.settings.together_api_key or self.settings.ai_api_key,
+            'perplexity': self.settings.perplexity_api_key or self.settings.ai_api_key,
+            'deepseek': self.settings.deepseek_api_key or self.settings.ai_api_key,
+            'xai': self.settings.xai_api_key or self.settings.ai_api_key,
+            'cohere': self.settings.cohere_api_key or self.settings.ai_api_key,
+            'huggingface': self.settings.huggingface_api_key or self.settings.ai_api_key,
+            'fireworks': self.settings.fireworks_api_key or self.settings.ai_api_key,
             'custom': self.settings.ai_api_key,
         }.get(provider, self.settings.ai_api_key)
         return provider, env_token, self.settings.ai_base_url, self.settings.ai_default_model
@@ -327,6 +337,16 @@ class Store:
             'openai': self.settings.openai_api_key,
             'openrouter': self.settings.openrouter_api_key,
             'gemini': self.settings.gemini_api_key,
+            'anthropic': self.settings.anthropic_api_key,
+            'groq': self.settings.groq_api_key,
+            'mistral': self.settings.mistral_api_key,
+            'together': self.settings.together_api_key,
+            'perplexity': self.settings.perplexity_api_key,
+            'deepseek': self.settings.deepseek_api_key,
+            'xai': self.settings.xai_api_key,
+            'cohere': self.settings.cohere_api_key,
+            'huggingface': self.settings.huggingface_api_key,
+            'fireworks': self.settings.fireworks_api_key,
             self.settings.ai_default_provider: self.settings.ai_api_key,
         }.items():
             if p and token and not any(x['provider'] == p for x in items):

@@ -15,9 +15,9 @@ from app.config import get_settings
 from app.services.archive import extract_archive
 from app.services.project_normalizer import list_files_for_upload, normalize_project
 from app.services.github_client import GitHubAuth, GitHubClient, GitHubError, parse_repo
-from app.services.actions_runner import ActionsRunner
-from app.services.repo_patch import apply_agent_instruction
-from app.services.supabase_client import SupabaseClient
+from app.services.supabase_client import SupabaseClient, SupabaseSqlClient
+from app.services.repo_agent import apply_instruction, install_workflow
+from app.services.actions_runner import run_agent_command
 
 settings = get_settings()
 
@@ -49,6 +49,17 @@ def require_admin(authorization: str | None = Header(default=None)) -> bool:
     return True
 
 
+def require_agent_api(authorization: str | None = Header(default=None), x_agent_token: str | None = Header(default=None)) -> bool:
+    token = settings.agent_api_token or settings.admin_api_token
+    if not token:
+        raise HTTPException(500, 'AGENT_API_TOKEN or ADMIN_API_TOKEN is not configured')
+    bearer = f'Bearer {token}'
+    ok = (authorization and hmac.compare_digest(authorization, bearer)) or (x_agent_token and hmac.compare_digest(x_agent_token, token))
+    if not ok:
+        raise HTTPException(401, 'Unauthorized agent token')
+    return True
+
+
 class RepoContext(BaseModel):
     token: str | None = None
     repo: str
@@ -71,17 +82,21 @@ class CreateRepoRequest(BaseModel):
     name: str
     private: bool = True
     description: str = 'Created by Moataz Repo Agent'
+    auto_unique: bool = False
 
 
-class AgentInstructionRequest(RepoContext):
+class AgentCommandRequest(RepoContext):
     instruction: str
 
 
-class TerminalRunRequest(RepoContext):
+class TerminalRequest(RepoContext):
     command: str
     workdir: str = '.'
     commit_changes: bool = False
-    commit_message: str = 'Apply agent terminal changes'
+
+
+class SupabaseSqlRequest(BaseModel):
+    sql: str
 
 
 def client_from_token(token: str | None) -> GitHubClient:
@@ -135,9 +150,8 @@ async def health() -> dict[str, Any]:
         'webhook_url': settings.webhook_url if settings.public_url else '',
         'github_token_env': bool(settings.github_token),
         'supabase_enabled': SupabaseClient().enabled(),
-        'agent_allow_terminal': settings.agent_allow_terminal,
-        'agent_require_approval': settings.agent_require_approval,
-        'agent_allowed_commands': settings.agent_allowed_commands,
+        'supabase_sql_enabled': SupabaseSqlClient().enabled(),
+        'agent_terminal_enabled': settings.agent_allow_terminal,
     }
 
 
@@ -229,7 +243,7 @@ async def dashboard() -> str:
 @app.post('/api/github/repos', dependencies=[Depends(require_admin)])
 async def api_create_repo(req: CreateRepoRequest):
     client = client_from_token(req.token)
-    return await client.create_repo(req.name, req.private, req.description)
+    return await client.create_repo(req.name, req.private, req.description, auto_unique=req.auto_unique)
 
 
 @app.post('/api/github/list', dependencies=[Depends(require_admin)])
@@ -334,55 +348,49 @@ async def api_upload_archive(
     }
 
 
-
-
-@app.post('/api/agent/apply', dependencies=[Depends(require_admin)])
-async def api_agent_apply(req: AgentInstructionRequest):
-    client = client_from_token(req.token)
-    result = await apply_agent_instruction(
-        client=client,
-        repo_value=req.repo,
-        branch=req.branch,
-        instruction=req.instruction,
-    )
-    return {
-        'ok': True,
-        'action': result.action,
-        'path': result.path,
-        'message': result.message,
-    }
-
-
-@app.post('/api/github/term', dependencies=[Depends(require_admin)])
-async def api_github_term(req: TerminalRunRequest):
-    client = client_from_token(req.token)
-    owner, repo = parse_repo(req.repo)
-    runner = ActionsRunner(client)
-    result = await runner.dispatch_and_wait(
-        owner=owner,
-        repo=repo,
-        branch=req.branch,
-        command=req.command,
-        workdir=req.workdir,
-        commit_changes=req.commit_changes,
-        commit_message=req.commit_message,
-    )
-    return {
-        'ok': result.conclusion == 'success',
-        'run_id': result.run_id,
-        'status': result.status,
-        'conclusion': result.conclusion,
-        'html_url': result.html_url,
-        'logs_tail': result.logs[-12000:],
-    }
-
-
 @app.get('/api/supabase/{table}', dependencies=[Depends(require_admin)])
 async def api_supabase(table: str, limit: int = 20):
     return await SupabaseClient().select(
         table=table,
         limit=min(limit, 100),
     )
+
+
+@app.post('/api/agent/apply', dependencies=[Depends(require_agent_api)])
+async def api_agent_apply(req: AgentCommandRequest):
+    client = client_from_token(req.token)
+    owner, repo = parse_repo(req.repo)
+    result = await apply_instruction(client, owner, repo, req.branch, req.instruction)
+    return {'ok': result.ok, 'action': result.action, 'message': result.message, 'details': result.details}
+
+
+@app.post('/api/agent/analyze', dependencies=[Depends(require_agent_api)])
+async def api_agent_analyze(req: RepoContext):
+    client = client_from_token(req.token)
+    owner, repo = parse_repo(req.repo)
+    result = await apply_instruction(client, owner, repo, req.branch, 'analyze')
+    return {'ok': result.ok, 'action': result.action, 'message': result.message, 'details': result.details}
+
+
+@app.post('/api/agent/install-workflow', dependencies=[Depends(require_agent_api)])
+async def api_agent_install_workflow(req: RepoContext):
+    client = client_from_token(req.token)
+    owner, repo = parse_repo(req.repo)
+    result = await install_workflow(client, owner, repo, req.branch)
+    return {'ok': result.ok, 'action': result.action, 'message': result.message, 'details': result.details}
+
+
+@app.post('/api/agent/term', dependencies=[Depends(require_agent_api)])
+async def api_agent_terminal(req: TerminalRequest):
+    client = client_from_token(req.token)
+    owner, repo = parse_repo(req.repo)
+    result = await run_agent_command(client, owner, repo, req.branch, req.command, req.workdir, req.commit_changes)
+    return result.__dict__
+
+
+@app.post('/api/supabase/sql', dependencies=[Depends(require_agent_api)])
+async def api_supabase_sql(req: SupabaseSqlRequest):
+    return await SupabaseSqlClient().execute(req.sql)
 
 
 @app.exception_handler(GitHubError)

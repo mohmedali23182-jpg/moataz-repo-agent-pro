@@ -1,163 +1,110 @@
 from __future__ import annotations
 
 import asyncio
-import io
-import re
+import shlex
 import time
-import zipfile
 from dataclasses import dataclass
 from typing import Any
 
 from app.config import get_settings
-from app.services.agent_workflow import AGENT_WORKFLOW_CONTENT, AGENT_WORKFLOW_ID, AGENT_WORKFLOW_PATH
 from app.services.github_client import GitHubClient, GitHubError
+from app.services.agent_workflow import AGENT_WORKFLOW_PATH
 
 
-DANGEROUS_PATTERNS = [
-    r'\brm\s+-rf\s+/',
-    r'\bsudo\b',
-    r'\bmkfs\b',
-    r'\bdd\s+if=',
-    r':\s*\(\s*\)\s*\{\s*:\s*\|\s*:',
-    r'\bshutdown\b',
-    r'\breboot\b',
-    r'\bpasswd\b',
-    r'\bchown\s+-R\s+/',
-    r'\bchmod\s+-R\s+777\s+/',
-]
-
+DANGEROUS_TOKENS = {'rm', 'mkfs', 'dd', 'shutdown', 'reboot', ':(){', 'sudo', 'chmod 777'}
 
 @dataclass
-class AgentCommandResult:
-    run_id: int | None
+class TerminalRunResult:
+    ok: bool
     status: str
     conclusion: str | None
+    run_id: int | None
     html_url: str | None
     logs: str
 
 
-class ActionsRunner:
-    def __init__(self, client: GitHubClient) -> None:
-        self.client = client
-        self.settings = get_settings()
+def validate_command(command: str) -> None:
+    settings = get_settings()
+    if not settings.agent_allow_terminal:
+        raise GitHubError('تشغيل الطرفية معطل. فعّل AGENT_ALLOW_TERMINAL=true في Railway.')
+    if len(command) > 2000:
+        raise GitHubError('الأمر طويل جدًا.')
+    lowered = command.lower()
+    for token in DANGEROUS_TOKENS:
+        if token in lowered:
+            raise GitHubError(f'الأمر يحتوي عنصرًا خطيرًا أو غير مسموح: {token}')
+    try:
+        first = shlex.split(command)[0]
+    except Exception:
+        raise GitHubError('صيغة الأمر غير صحيحة.')
+    if first not in settings.allowed_commands:
+        raise GitHubError(f'الأمر {first} غير مسموح. عدّل AGENT_ALLOWED_COMMANDS إذا كنت تريده.')
 
-    def _allowed_roots(self) -> set[str]:
-        raw = self.settings.agent_allowed_commands.strip()
-        if not raw:
-            raw = 'npm,pnpm,yarn,python,pip,pytest,node,git,ls,cat,sed,grep'
-        return {x.strip() for x in raw.split(',') if x.strip()}
 
-    def validate_command(self, command: str) -> None:
-        if not self.settings.agent_allow_terminal:
-            raise GitHubError('تشغيل الطرفية معطل. اضبط AGENT_ALLOW_TERMINAL=true في Railway.')
-        if not command.strip():
-            raise GitHubError('الأمر فارغ.')
-        for pattern in DANGEROUS_PATTERNS:
-            if re.search(pattern, command, flags=re.IGNORECASE):
-                raise GitHubError(f'تم رفض الأمر لوجود نمط خطير: {pattern}')
-        roots = self._allowed_roots()
-        first = command.strip().split()[0].strip()
-        first = first.split('/')[-1]
-        if first not in roots:
-            raise GitHubError(
-                'الأمر غير مسموح. أول كلمة يجب أن تكون واحدة من: ' + ', '.join(sorted(roots))
+async def run_agent_command(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    branch: str,
+    command: str,
+    workdir: str = '.',
+    commit_changes: bool = False,
+    progress=None,
+) -> TerminalRunResult:
+    settings = get_settings()
+    validate_command(command)
+
+    if progress:
+        await progress('🧩 التأكد من وجود Workflow الطرفية...')
+    try:
+        await client.get_file(owner, repo, AGENT_WORKFLOW_PATH, branch)
+    except Exception:
+        raise GitHubError(f'Workflow غير مثبت. نفّذ /install_workflow أولًا أو ثبته من البوت.')
+
+    before = time.time() - 15
+    workflow_id = settings.agent_workflow_file
+    if progress:
+        await progress('🚀 تشغيل GitHub Actions workflow_dispatch...')
+    await client.workflow_dispatch(owner, repo, workflow_id, branch, {
+        'command': command,
+        'workdir': workdir or settings.agent_default_workdir,
+        'commit_changes': 'true' if commit_changes else 'false',
+        'commit_message': 'Agent terminal changes',
+    })
+
+    run = None
+    deadline = time.time() + settings.agent_max_command_seconds
+    while time.time() < deadline:
+        runs = await client.list_workflow_runs(owner, repo, workflow_id, branch=branch, per_page=10)
+        candidates = [r for r in runs.get('workflow_runs', []) if r.get('event') == 'workflow_dispatch']
+        if candidates:
+            run = candidates[0]
+            break
+        await asyncio.sleep(3)
+    if not run:
+        raise GitHubError('تم إرسال الأمر لكن لم أجد Run في GitHub Actions.')
+
+    run_id = run['id']
+    html_url = run.get('html_url')
+    if progress:
+        await progress(f'⏳ بدأ التنفيذ. Run ID: {run_id}')
+
+    while time.time() < deadline:
+        run = await client.get_workflow_run(owner, repo, run_id)
+        status = run.get('status')
+        conclusion = run.get('conclusion')
+        if progress:
+            await progress(f'⌛ الحالة: {status} / النتيجة: {conclusion or "لم تنته بعد"}')
+        if status == 'completed':
+            logs = await client.get_run_logs_text(owner, repo, run_id)
+            return TerminalRunResult(
+                ok=conclusion == 'success',
+                status=status,
+                conclusion=conclusion,
+                run_id=run_id,
+                html_url=html_url,
+                logs=logs[-3500:],
             )
+        await asyncio.sleep(8)
 
-    async def ensure_workflow(self, owner: str, repo: str, branch: str) -> bool:
-        try:
-            content, _ = await self.client.get_file(owner, repo, AGENT_WORKFLOW_PATH, branch)
-            return 'workflow_dispatch' in content and 'Agent Command' in content
-        except Exception:
-            await self.client.put_file(
-                owner=owner,
-                repo=repo,
-                path=AGENT_WORKFLOW_PATH,
-                content=AGENT_WORKFLOW_CONTENT,
-                branch=branch,
-                message='Install Moataz Repo Agent command workflow',
-            )
-            return False
-
-    async def dispatch_and_wait(
-        self,
-        owner: str,
-        repo: str,
-        branch: str,
-        command: str,
-        workdir: str = '.',
-        commit_changes: bool = False,
-        commit_message: str = 'Apply agent terminal changes',
-    ) -> AgentCommandResult:
-        self.validate_command(command)
-        existed = await self.ensure_workflow(owner, repo, branch)
-        if not existed:
-            raise GitHubError(
-                'تم تثبيت workflow الطرفية في المستودع. أعد تنفيذ /term بعد 30-60 ثانية حتى يتعرف GitHub Actions عليه.'
-            )
-
-        started_at = time.time()
-        await self.client.workflow_dispatch(
-            owner=owner,
-            repo=repo,
-            workflow_id=AGENT_WORKFLOW_ID,
-            ref=branch,
-            inputs={
-                'command': command,
-                'workdir': workdir or '.',
-                'commit_changes': 'true' if commit_changes else 'false',
-                'commit_message': commit_message or 'Apply agent terminal changes',
-            },
-        )
-
-        run = await self._wait_for_new_run(owner, repo, branch, started_at)
-        run_id = int(run['id'])
-        final = await self._wait_for_run(owner, repo, run_id)
-        logs = await self.get_run_logs(owner, repo, run_id)
-        return AgentCommandResult(
-            run_id=run_id,
-            status=final.get('status', ''),
-            conclusion=final.get('conclusion'),
-            html_url=final.get('html_url'),
-            logs=logs,
-        )
-
-    async def _wait_for_new_run(self, owner: str, repo: str, branch: str, started_at: float) -> dict[str, Any]:
-        for _ in range(30):
-            runs = await self.client.list_workflow_runs(owner, repo, AGENT_WORKFLOW_ID, branch=branch, per_page=10)
-            for run in runs.get('workflow_runs', []):
-                if run.get('event') == 'workflow_dispatch':
-                    created_at = run.get('created_at', '')
-                    # created_at is trusted enough for ordering; GitHub returns newest first.
-                    return run
-            await asyncio.sleep(2)
-        raise GitHubError('تم إرسال workflow_dispatch لكن لم يظهر run جديد خلال المهلة.')
-
-    async def _wait_for_run(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
-        max_seconds = max(30, int(self.settings.agent_max_command_seconds))
-        deadline = time.time() + max_seconds
-        last = None
-        while time.time() < deadline:
-            last = await self.client.get_workflow_run(owner, repo, run_id)
-            if last.get('status') == 'completed':
-                return last
-            await asyncio.sleep(5)
-        raise GitHubError(f'انتهت مهلة انتظار GitHub Actions بعد {max_seconds} ثانية. Run ID: {run_id}')
-
-    async def get_run_logs(self, owner: str, repo: str, run_id: int) -> str:
-        raw = await self.client.get_workflow_run_logs_zip(owner, repo, run_id)
-        if not raw:
-            return ''
-        parts: list[str] = []
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            for name in sorted(zf.namelist()):
-                if name.endswith('/'):
-                    continue
-                try:
-                    text = zf.read(name).decode('utf-8', errors='replace')
-                except Exception:
-                    continue
-                parts.append(f'===== {name} =====\n{text}')
-        logs = '\n\n'.join(parts)
-        if len(logs) > 12000:
-            logs = logs[-12000:]
-        return logs
+    raise GitHubError('انتهى وقت انتظار أمر الطرفية قبل اكتماله.')

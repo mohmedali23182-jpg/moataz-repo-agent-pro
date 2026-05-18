@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import time
 import re
+import zipfile
+from io import BytesIO
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -48,23 +50,27 @@ class GitHubClient:
         }
 
     async def request(self, method: str, path: str, **kwargs: Any) -> Any:
-        timeout = kwargs.pop('timeout', 60)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
             r = await client.request(method, GITHUB_API + path, headers=self.headers, **kwargs)
         if r.status_code >= 400:
             detail = r.text[:1200]
+            if r.status_code == 422 and 'name already exists' in detail:
+                raise GitHubError('اسم المستودع موجود مسبقًا في هذا الحساب. اختر اسمًا آخر أو استخدم خيار --unique لإنشاء اسم تلقائي.')
             raise GitHubError(f'GitHub API error {r.status_code}: {detail}')
         if r.status_code == 204:
             return {}
-        return r.json()
+        if not r.content:
+            return {}
+        try:
+            return r.json()
+        except Exception:
+            return {'text': r.text}
 
-    async def request_bytes(self, method: str, path: str, **kwargs: Any) -> bytes:
-        timeout = kwargs.pop('timeout', 120)
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async def raw_request(self, method: str, path: str, **kwargs: Any) -> bytes:
+        async with httpx.AsyncClient(timeout=90, follow_redirects=True) as client:
             r = await client.request(method, GITHUB_API + path, headers=self.headers, **kwargs)
         if r.status_code >= 400:
-            detail = r.text[:1200]
-            raise GitHubError(f'GitHub API error {r.status_code}: {detail}')
+            raise GitHubError(f'GitHub API error {r.status_code}: {r.text[:1200]}')
         return r.content
 
     async def viewer(self) -> dict[str, Any]:
@@ -73,8 +79,26 @@ class GitHubClient:
     async def list_repos(self, visibility: str = 'all', limit: int = 30) -> list[dict[str, Any]]:
         return await self.request('GET', f'/user/repos?visibility={visibility}&per_page={limit}&sort=updated')
 
-    async def create_repo(self, name: str, private: bool = True, description: str = '') -> dict[str, Any]:
-        return await self.request('POST', '/user/repos', json={'name': name, 'private': private, 'description': description, 'auto_init': True})
+    async def create_repo(self, name: str, private: bool = True, description: str = '', auto_unique: bool = False) -> dict[str, Any]:
+        safe_name = re.sub(r'[^A-Za-z0-9._-]+', '-', name.strip()).strip('-_.')
+        if not safe_name:
+            raise GitHubError('اسم المستودع غير صالح.')
+        payload = {'name': safe_name, 'private': private, 'description': description, 'auto_init': True}
+        try:
+            return await self.request('POST', '/user/repos', json=payload)
+        except GitHubError as e:
+            if not auto_unique or 'موجود مسبقًا' not in str(e):
+                raise
+            viewer = await self.viewer()
+            login = viewer.get('login', '')
+            for i in range(2, 30):
+                candidate = f'{safe_name}-{i}'
+                try:
+                    await self.get_repo(login, candidate)
+                except Exception:
+                    payload['name'] = candidate
+                    return await self.request('POST', '/user/repos', json=payload)
+            raise GitHubError('تعذر إيجاد اسم بديل تلقائي. اختر اسمًا مختلفًا.')
 
     async def get_repo(self, owner: str, repo: str) -> dict[str, Any]:
         return await self.request('GET', f'/repos/{owner}/{repo}')
@@ -122,17 +146,49 @@ class GitHubClient:
     async def workflow_dispatch(self, owner: str, repo: str, workflow_id: str, ref: str, inputs: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self.request('POST', f'/repos/{owner}/{repo}/actions/workflows/{workflow_id}/dispatches', json={'ref': ref, 'inputs': inputs or {}})
 
+
     async def list_workflow_runs(self, owner: str, repo: str, workflow_id: str, branch: str | None = None, per_page: int = 10) -> dict[str, Any]:
-        query = f'per_page={per_page}'
+        query = f'?per_page={per_page}'
         if branch:
             query += f'&branch={branch}'
-        return await self.request('GET', f'/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs?{query}')
+        return await self.request('GET', f'/repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs{query}')
 
     async def get_workflow_run(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
         return await self.request('GET', f'/repos/{owner}/{repo}/actions/runs/{run_id}')
 
-    async def get_workflow_run_logs_zip(self, owner: str, repo: str, run_id: int) -> bytes:
-        return await self.request_bytes('GET', f'/repos/{owner}/{repo}/actions/runs/{run_id}/logs')
+    async def list_workflow_jobs(self, owner: str, repo: str, run_id: int) -> dict[str, Any]:
+        return await self.request('GET', f'/repos/{owner}/{repo}/actions/runs/{run_id}/jobs')
+
+    async def get_job_logs_text(self, owner: str, repo: str, job_id: int) -> str:
+        raw = await self.raw_request('GET', f'/repos/{owner}/{repo}/actions/jobs/{job_id}/logs')
+        return raw.decode('utf-8', errors='replace')
+
+    async def get_run_logs_text(self, owner: str, repo: str, run_id: int) -> str:
+        try:
+            jobs = await self.list_workflow_jobs(owner, repo, run_id)
+            chunks = []
+            for job in jobs.get('jobs', [])[:5]:
+                chunks.append(await self.get_job_logs_text(owner, repo, int(job['id'])))
+            return '\n\n'.join(chunks)
+        except Exception:
+            raw = await self.raw_request('GET', f'/repos/{owner}/{repo}/actions/runs/{run_id}/logs')
+            try:
+                with zipfile.ZipFile(BytesIO(raw)) as zf:
+                    texts = []
+                    for name in zf.namelist()[:10]:
+                        texts.append(zf.read(name).decode('utf-8', errors='replace'))
+                    return '\n\n'.join(texts)
+            except Exception:
+                return raw.decode('utf-8', errors='replace')
+
+    async def create_codespace(self, owner: str, repo: str, ref: str = 'main', machine: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {'ref': ref}
+        if machine:
+            payload['machine'] = machine
+        return await self.request('POST', f'/repos/{owner}/{repo}/codespaces', json=payload)
+
+    async def list_codespaces(self) -> dict[str, Any]:
+        return await self.request('GET', '/user/codespaces?per_page=20')
 
     async def add_collaborator(self, owner: str, repo: str, username: str, permission: str = 'push') -> dict[str, Any]:
         return await self.request('PUT', f'/repos/{owner}/{repo}/collaborators/{username}', json={'permission': permission})

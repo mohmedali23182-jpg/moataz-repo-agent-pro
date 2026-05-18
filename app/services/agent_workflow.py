@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 AGENT_WORKFLOW_PATH = '.github/workflows/agent-command.yml'
-AGENT_WORKFLOW_ID = 'agent-command.yml'
 
 AGENT_WORKFLOW_CONTENT = '''name: Agent Command
 
@@ -18,7 +17,7 @@ on:
         default: "."
         type: string
       commit_changes:
-        description: "Commit changed files after command finishes"
+        description: "Commit changed files after command"
         required: false
         default: "false"
         type: choice
@@ -26,9 +25,9 @@ on:
           - "false"
           - "true"
       commit_message:
-        description: "Commit message when commit_changes=true"
+        description: "Commit message when commit_changes is true"
         required: false
-        default: "Apply agent terminal changes"
+        default: "Agent command changes"
         type: string
 
 permissions:
@@ -49,24 +48,18 @@ jobs:
       - name: Show context
         shell: bash
         run: |
-          set -euo pipefail
-          echo "Repository: $GITHUB_REPOSITORY"
-          echo "Ref: $GITHUB_REF"
-          echo "Actor: $GITHUB_ACTOR"
           pwd
           ls -la
           echo "Workdir: ${{ inputs.workdir }}"
 
       - name: Run agent command
         shell: bash
-        env:
-          AGENT_COMMAND: ${{ inputs.command }}
         run: |
           set -euo pipefail
           cd "${{ inputs.workdir }}"
           echo "Running command:"
-          printf '%s\\n' "$AGENT_COMMAND"
-          bash -lc "$AGENT_COMMAND"
+          echo "${{ inputs.command }}"
+          bash -lc "${{ inputs.command }}"
 
       - name: Show git status
         if: always()
@@ -78,10 +71,9 @@ jobs:
         if: ${{ inputs.commit_changes == 'true' }}
         shell: bash
         run: |
-          set -euo pipefail
-          if [[ -n "$(git status --porcelain)" ]]; then
+          if [ -n "$(git status --short)" ]; then
             git config user.name "Moataz Repo Agent"
-            git config user.email "actions@github.com"
+            git config user.email "moataz-agent@users.noreply.github.com"
             git add -A
             git commit -m "${{ inputs.commit_message }}"
             git push

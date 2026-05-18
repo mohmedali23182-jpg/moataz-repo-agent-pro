@@ -35,6 +35,7 @@ def menu() -> InlineKeyboardMarkup:
     rows = [
         [InlineKeyboardButton(text='🔗 ربط مستودع', callback_data='help_repo'), InlineKeyboardButton(text='🔑 ربط توكن', callback_data='help_token')],
         [InlineKeyboardButton(text='📂 الملفات', callback_data='cmd_ls'), InlineKeyboardButton(text='👤 الحساب', callback_data='cmd_info')],
+        [InlineKeyboardButton(text='🔌 الاتصالات', callback_data='cmd_connections'), InlineKeyboardButton(text='📌 الريبو الحالي', callback_data='cmd_current_repo')],
         [InlineKeyboardButton(text='🆕 إنشاء Repo', callback_data='help_create_repo'), InlineKeyboardButton(text='🌿 إنشاء Branch', callback_data='help_branch')],
         [InlineKeyboardButton(text='📦 فك ضغط ورفع', callback_data='help_unpack'), InlineKeyboardButton(text='🚀 ترتيب مشروع', callback_data='help_normalize')],
         [InlineKeyboardButton(text='⬆️ رفع ملف', callback_data='help_upload')],
@@ -50,7 +51,7 @@ def help_text() -> str:
 
 <b>ابدأ هكذا:</b>
 1) /token github_pat_xxx
-2) /repo https://github.com/OWNER/REPO
+2) /switch_repo https://github.com/OWNER/REPO
 3) /branch main
 
 ثم استخدم الأوامر أو الأزرار بالأسفل.'''
@@ -115,14 +116,20 @@ async def clear_token(message: Message):
 
 
 @router.message(Command('repo'))
+@router.message(Command('switch_repo'))
 async def set_repo(message: Message):
-    repo = message.text.replace('/repo', '', 1).strip()
+    cmd = '/switch_repo' if message.text.startswith('/switch_repo') else '/repo'
+    repo = message.text.replace(cmd, '', 1).strip()
     if not repo:
         await message.answer('استخدم: <code>/repo https://github.com/OWNER/REPO</code>')
         return
     parse_repo(repo)
     store.set_repo(message.from_user.id, repo)
-    await message.answer(f'✅ تم ربط المستودع: <code>{html.escape(repo)}</code>')
+    await message.answer(
+        '✅ تم تفعيل جلسة المستودع لهذا المستخدم فقط:\n'
+        f'<code>{html.escape(repo)}</code>\n'
+        'لن تتداخل أوامر /agent و /term و /upload مع أي مستودع سابق.'
+    )
 
 
 @router.message(Command('branch'))
@@ -162,6 +169,78 @@ async def repos(message: Message):
         await message.answer('\n'.join(lines))
     except Exception as e:
         await send_error(message, e)
+
+
+async def _connections_text(uid: int, include_capabilities: bool = True) -> str:
+    status = store.connections_status(uid)
+    lines = ['<b>🔌 اتصالات GitHub</b>']
+    lines.append(f"توكن المستخدم: {'✅' if status['has_user_token'] else '❌'}")
+    lines.append(f"توكن Railway العام: {'✅' if status['has_env_token'] else '❌'}")
+    session = status.get('active_session') or {}
+    if session:
+        lines.append('\n<b>📌 الجلسة الحالية:</b>')
+        lines.append(f"Repo: <code>{html.escape(session.get('repo_url',''))}</code>")
+        lines.append(f"Branch: <code>{html.escape(session.get('branch') or settings.github_default_branch)}</code>")
+        lines.append(f"Token ID: <code>{html.escape(session.get('github_token_id',''))}</code>")
+    else:
+        lines.append('\nلا يوجد مستودع حالي. استخدم /switch_repo رابط_المستودع')
+    history = status.get('known_repositories') or []
+    lines.append(f"\nالمستودعات المعروفة لهذه الجلسة: <b>{len(history)}</b>")
+    for item in history[:8]:
+        lines.append(f"• <code>{html.escape(item.get('repo_url',''))}</code>")
+    if include_capabilities:
+        try:
+            client, _ = get_client_for(uid)
+            caps = await client.capabilities()
+            scopes = ', '.join(caps.get('oauth_scopes') or []) or 'غير ظاهرة/غير متاحة'
+            lines.append('\n<b>قدرات التوكن:</b>')
+            lines.append(f"GitHub: <b>{html.escape(str(caps.get('login') or ''))}</b>")
+            lines.append(f"Repos visible: <b>{caps.get('repos_count', 0)}</b>")
+            lines.append(f"Create repo: {'✅ محتمل' if caps.get('can_create_repo') else '⚠️ غير مؤكد'}")
+            lines.append(f"Scopes: <code>{html.escape(scopes)}</code>")
+        except Exception as exc:
+            lines.append('\nتعذر فحص صلاحيات GitHub: <code>' + html.escape(str(exc))[:500] + '</code>')
+    return '\n'.join(lines)[:3900]
+
+
+@router.message(Command('connections'))
+async def connections(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    await message.answer(await _connections_text(message.from_user.id))
+
+
+@router.message(Command('current_repo'))
+async def current_repo(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    session = store.get_session(message.from_user.id)
+    if not session:
+        await message.answer('لا يوجد مستودع حالي. استخدم: <code>/switch_repo https://github.com/OWNER/REPO</code>')
+        return
+    await message.answer(
+        '📌 <b>المستودع الحالي</b>\n'
+        f"Repo: <code>{html.escape(session.get('repo_url',''))}</code>\n"
+        f"Branch: <code>{html.escape(session.get('branch') or settings.github_default_branch)}</code>\n"
+        f"Token: <code>{html.escape(session.get('github_token_id',''))}</code>"
+    )
+
+
+@router.message(Command('disconnect_repo'))
+async def disconnect_repo_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    store.disconnect_repo(message.from_user.id)
+    await message.answer('✅ تم فصل المستودع الحالي فقط. التوكن بقي محفوظًا، ويمكنك ربط مستودع آخر عبر /switch_repo.')
+
+
+@router.message(Command('disconnect_all'))
+async def disconnect_all_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    clear_token = '--clear-token' in message.text
+    store.disconnect_all(message.from_user.id, clear_token=clear_token)
+    await message.answer('✅ تم فصل كل جلسات المستودعات' + (' وحذف التوكن الخاص.' if clear_token else '. التوكن الخاص لم يُحذف.'))
 
 
 @router.message(Command('create_repo'))
@@ -357,7 +436,14 @@ async def normalize_only(message: Message, bot: Bot):
 @router.message(Command('unpack'))
 async def unpack(message: Message, bot: Bot):
     try:
-        target_dir = message.text.replace('/unpack', '', 1).strip().strip('/') or 'uploaded_archive'
+        raw_args = message.text.replace('/unpack', '', 1).strip()
+        keep_folder = '--keep-folder' in raw_args
+        raw_args = raw_args.replace('--keep-folder', '').strip()
+        # Default is repository root so Railway/Vercel can detect package.json, Dockerfile, etc.
+        # Use /unpack target/folder --keep-folder only when the user deliberately wants a subfolder.
+        target_dir = raw_args.strip('/') if keep_folder and raw_args else ''
+        if keep_folder and not target_dir:
+            target_dir = 'uploaded_archive'
         src = await _download_telegram_file(bot, message)
         extract_dir = src.parent / (src.stem + '_extracted')
         output_dir = src.parent / (src.stem + '_normalized_output')
@@ -367,9 +453,18 @@ async def unpack(message: Message, bot: Bot):
         extract_archive(src, extract_dir)
         normalized_dir, report = normalize_project(extract_dir, output_dir)
         client, _, owner, repo, branch = repo_context(message.from_user.id)
-        await message.answer(report.telegram_text())
+        files = list_files_for_upload(normalized_dir)
+        deploy_files = [name for name in ['package.json','Dockerfile','requirements.txt','pyproject.toml','railway.json','vercel.json','main.py','app.py'] if (normalized_dir / name).exists()]
+        await message.answer(
+            report.telegram_text() +
+            f"\n\n📊 <b>تقرير الرفع</b>" +
+            f"\nDetected root: <code>{html.escape(report.original_root)}</code>" +
+            f"\nFiles count: <b>{len(files)}</b>" +
+            f"\nDeploy files: <code>{html.escape(', '.join(deploy_files) or 'غير موجودة')}</code>" +
+            f"\nTarget: <code>{html.escape(target_dir or 'repository root')}</code>"
+        )
         uploaded = await _upload_directory_to_github(client, owner, repo, branch, normalized_dir, target_dir, message)
-        await message.answer(f'✅ اكتمل الترتيب والرفع: {uploaded} ملف إلى <code>{html.escape(target_dir)}</code>')
+        await message.answer(f'✅ اكتمل الترتيب والرفع: {uploaded} ملف إلى <code>{html.escape(target_dir or "جذر المستودع")}</code>')
     except Exception as e:
         await send_error(message, e)
 
@@ -649,11 +744,11 @@ async def help_callback(call: CallbackQuery):
         'help_token': 'ربط توكن:\n<code>/token github_pat_xxx</code>\nالأفضل وضعه في Railway إذا البوت خاص بك فقط.',
         'help_create_repo': 'إنشاء مستودع:\n<code>/create_repo my-project private</code> أو <code>/create_repo my-project public</code>',
         'help_branch': 'إنشاء فرع:\n<code>/new_branch feature-name</code>\nتغيير الفرع:\n<code>/branch main</code>',
-        'help_unpack': 'أرسل ملف zip/rar/7z/tar ثم رد عليه:\n<code>/unpack target/folder</code>\nسيتم ترتيب المشروع تلقائيًا قبل الرفع. استخدم <code>/unpack_raw target/folder</code> للرفع كما هو.',
+        'help_unpack': 'أرسل ملف zip/rar/7z/tar ثم رد عليه:\n<code>/unpack</code>\nيرفع المشروع المرتب إلى جذر المستودع تلقائيًا. لو تريد حفظ مجلد فرعي استخدم: <code>/unpack target/folder --keep-folder</code>.',
         'help_normalize': 'لترتيب مشروع فقط وإرسال ZIP نظيف بدون رفع إلى GitHub:\nرد على الملف بالأمر <code>/normalize</code>',
         'help_upload': 'أرسل ملفًا ثم رد عليه:\n<code>/upload path/in/repo.ext</code>',
         'help_supabase': 'قراءة جدول مصرح به:\n<code>/supabase posts 10</code>',
-        'help_commands': '<code>/info /repos /ls /read /write /delete /upload /unpack /unpack_raw /normalize /create_repo /new_branch /pr /supabase /agent /term /analyze_repo /install_workflow /codespace</code>',
+        'help_commands': '<code>/connections /current_repo /switch_repo /disconnect_repo /disconnect_all /info /repos /ls /read /write /delete /upload /unpack /normalize /create_repo /new_branch /pr /supabase /agent /term /analyze_repo /install_workflow /codespace</code>',
         'help_agent': 'أوامر Agent:\n<code>/agent https://github.com/OWNER/REPO\nreplace app/main.py\nالمحتوى</code>\n<code>/agent ...\nmkdir app/new</code>\n<code>/analyze_repo https://github.com/OWNER/REPO</code>',
         'help_terminal': 'الطرفية تعمل عبر GitHub Actions بعد تثبيت Workflow:\n<code>/install_workflow https://github.com/OWNER/REPO</code>\nثم:\n<code>/term https://github.com/OWNER/REPO\nnpm run build</code>',
     }
@@ -689,6 +784,33 @@ async def cb_ls(call: CallbackQuery):
             icon = '📁' if item.get('type') == 'dir' else '📄'
             lines.append(f"{icon} <code>{html.escape(item.get('path',''))}</code>")
         await call.message.answer('\n'.join(lines)[:4000])
+    except Exception as e:
+        await call.message.answer('❌ ' + html.escape(str(e))[:3500])
+    await call.answer()
+
+
+@router.callback_query(F.data == 'cmd_connections')
+async def cb_connections(call: CallbackQuery):
+    try:
+        await call.message.answer(await _connections_text(call.from_user.id))
+    except Exception as e:
+        await call.message.answer('❌ ' + html.escape(str(e))[:3500])
+    await call.answer()
+
+
+@router.callback_query(F.data == 'cmd_current_repo')
+async def cb_current_repo(call: CallbackQuery):
+    try:
+        session = store.get_session(call.from_user.id)
+        if not session:
+            await call.message.answer('لا يوجد مستودع حالي. استخدم /switch_repo رابط_المستودع')
+        else:
+            await call.message.answer(
+                '📌 <b>المستودع الحالي</b>\n'
+                f"Repo: <code>{html.escape(session.get('repo_url',''))}</code>\n"
+                f"Branch: <code>{html.escape(session.get('branch') or settings.github_default_branch)}</code>\n"
+                f"Token: <code>{html.escape(session.get('github_token_id',''))}</code>"
+            )
     except Exception as e:
         await call.message.answer('❌ ' + html.escape(str(e))[:3500])
     await call.answer()

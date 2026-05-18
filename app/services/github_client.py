@@ -66,6 +66,45 @@ class GitHubClient:
         except Exception:
             return {'text': r.text}
 
+
+    async def request_with_headers(self, method: str, path: str, **kwargs: Any) -> tuple[Any, dict[str, str]]:
+        async with httpx.AsyncClient(timeout=60, follow_redirects=True) as client:
+            r = await client.request(method, GITHUB_API + path, headers=self.headers, **kwargs)
+        headers = {k.lower(): v for k, v in r.headers.items()}
+        if r.status_code >= 400:
+            detail = r.text[:1200]
+            raise GitHubError(f'GitHub API error {r.status_code}: {detail}')
+        if r.status_code == 204 or not r.content:
+            return {}, headers
+        try:
+            return r.json(), headers
+        except Exception:
+            return {'text': r.text}, headers
+
+    async def capabilities(self) -> dict[str, Any]:
+        user, headers = await self.request_with_headers('GET', '/user')
+        scopes = [s.strip() for s in headers.get('x-oauth-scopes', '').split(',') if s.strip()]
+        accepted = [s.strip() for s in headers.get('x-accepted-oauth-scopes', '').split(',') if s.strip()]
+        repos: list[dict[str, Any]] = []
+        repos_error = ''
+        try:
+            repos = await self.list_repos(limit=100)
+        except Exception as exc:
+            repos_error = str(exc)
+        scope_set = set(scopes)
+        can_create_repo = bool({'repo', 'public_repo'}.intersection(scope_set)) or bool(user.get('plan'))
+        return {
+            'viewer': user,
+            'login': user.get('login'),
+            'user_type': user.get('type'),
+            'repos_count': len(repos),
+            'repos_sample': [{'full_name': r.get('full_name'), 'private': r.get('private')} for r in repos[:20]],
+            'can_create_repo': can_create_repo,
+            'oauth_scopes': scopes,
+            'accepted_oauth_scopes': accepted,
+            'repos_error': repos_error,
+        }
+
     async def raw_request(self, method: str, path: str, **kwargs: Any) -> bytes:
         async with httpx.AsyncClient(timeout=90, follow_redirects=True) as client:
             r = await client.request(method, GITHUB_API + path, headers=self.headers, **kwargs)

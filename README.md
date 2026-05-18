@@ -188,3 +188,30 @@ POST /api/supabase/sql
   "instruction": "mkdir app/new"
 }
 ```
+
+## Ultra Agent Update
+
+This build adds:
+
+- Repo Session Manager per Telegram user.
+- `/connections`, `/current_repo`, `/switch_repo`, `/disconnect_repo`, `/disconnect_all`.
+- GitHub capability checks: viewer, visible repos, scopes when exposed by GitHub, and create-repo inference.
+- Safer archive upload: `/unpack` now normalizes and uploads the detected project root to repository root by default. Use `--keep-folder` to intentionally upload into a subfolder.
+- External API endpoints:
+  - `GET /api/connections/status?telegram_id=...`
+  - `POST /api/repo/switch`
+  - `POST /api/repo/disconnect`
+- Plain-text `ENCRYPTION_KEY` is now accepted and safely derived into a Fernet key.
+
+Recommended Railway variables:
+
+```env
+AGENT_ALLOW_TERMINAL=true
+AGENT_REQUIRE_APPROVAL=true
+AGENT_MAX_COMMAND_SECONDS=1200
+AGENT_ALLOWED_COMMANDS=npm,pnpm,yarn,python,pip,pytest,node,git,ls,cat,sed,grep
+AGENT_DEFAULT_WORKDIR=.
+AGENT_API_TOKEN=change_this_strong_token
+AGENT_WORKFLOW_FILE=agent-command.yml
+SUPABASE_ALLOW_SQL=false
+```

@@ -18,6 +18,7 @@ from app.services.github_client import GitHubAuth, GitHubClient, GitHubError, pa
 from app.services.supabase_client import SupabaseClient, SupabaseSqlClient
 from app.services.repo_agent import apply_instruction, install_workflow
 from app.services.actions_runner import run_agent_command
+from app.services.store import Store
 
 settings = get_settings()
 
@@ -27,6 +28,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger('moataz-repo-agent')
+store = Store()
 
 bot = build_bot() if settings.telegram_bot_token else None
 dp = build_dispatcher()
@@ -97,6 +99,18 @@ class TerminalRequest(RepoContext):
 
 class SupabaseSqlRequest(BaseModel):
     sql: str
+
+
+class RepoSwitchRequest(BaseModel):
+    telegram_id: int
+    repo: str
+    branch: str | None = None
+
+
+class RepoDisconnectRequest(BaseModel):
+    telegram_id: int
+    all: bool = False
+    clear_token: bool = False
 
 
 def client_from_token(token: str | None) -> GitHubClient:
@@ -284,7 +298,7 @@ async def api_delete(req: DeleteRequest):
 async def api_upload_archive(
     repo: str = Form(...),
     branch: str = Form('main'),
-    target_dir: str = Form('uploaded_archive'),
+    target_dir: str = Form(''),
     token: str | None = Form(None),
     normalize: bool = Form(True),
     file: UploadFile = File(...),
@@ -391,6 +405,36 @@ async def api_agent_terminal(req: TerminalRequest):
 @app.post('/api/supabase/sql', dependencies=[Depends(require_agent_api)])
 async def api_supabase_sql(req: SupabaseSqlRequest):
     return await SupabaseSqlClient().execute(req.sql)
+
+
+@app.get('/api/connections/status', dependencies=[Depends(require_agent_api)])
+async def api_connections_status(telegram_id: int):
+    status = store.connections_status(telegram_id)
+    caps: dict[str, Any] | None = None
+    user = store.get_user(telegram_id)
+    token = user.get('github_token') or settings.github_token
+    if token:
+        try:
+            caps = await GitHubClient(GitHubAuth(token)).capabilities()
+        except Exception as exc:
+            caps = {'error': str(exc)}
+    status['github_capabilities'] = caps
+    return {'ok': True, 'status': status}
+
+
+@app.post('/api/repo/switch', dependencies=[Depends(require_agent_api)])
+async def api_repo_switch(req: RepoSwitchRequest):
+    store.set_repo(req.telegram_id, req.repo, req.branch)
+    return {'ok': True, 'status': store.connections_status(req.telegram_id)}
+
+
+@app.post('/api/repo/disconnect', dependencies=[Depends(require_agent_api)])
+async def api_repo_disconnect(req: RepoDisconnectRequest):
+    if req.all:
+        store.disconnect_all(req.telegram_id, clear_token=req.clear_token)
+    else:
+        store.disconnect_repo(req.telegram_id)
+    return {'ok': True, 'status': store.connections_status(req.telegram_id)}
 
 
 @app.exception_handler(GitHubError)

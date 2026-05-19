@@ -116,6 +116,45 @@ class Store:
             details TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )''')
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS agent_tasks (
+            task_id TEXT PRIMARY KEY,
+            telegram_id INTEGER NOT NULL,
+            repo_full TEXT,
+            branch TEXT,
+            status TEXT NOT NULL,
+            objective TEXT,
+            plan_json TEXT DEFAULT '{}',
+            result_json TEXT DEFAULT '{}',
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS agent_task_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER,
+            repo_full TEXT,
+            step TEXT,
+            message TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS repo_memory (
+            telegram_id INTEGER NOT NULL,
+            repo_full TEXT NOT NULL,
+            branch TEXT NOT NULL,
+            path TEXT NOT NULL,
+            language TEXT DEFAULT '',
+            summary TEXT NOT NULL,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(telegram_id, repo_full, branch, path)
+        )''')
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS last_errors (
+            telegram_id INTEGER NOT NULL,
+            repo_full TEXT NOT NULL,
+            branch TEXT,
+            source TEXT,
+            error TEXT,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(telegram_id, repo_full)
+        )''')
         self.conn.commit()
 
     def _build_fernet(self) -> Fernet:
@@ -359,3 +398,198 @@ class Store:
             if p and token and not any(x['provider'] == p for x in items):
                 items.append({'provider': p, 'base_url': self.settings.ai_base_url, 'model': self.settings.ai_default_model, 'source': 'env'})
         return items
+
+    # -------------------------
+    # Agentic task + memory helpers
+    # -------------------------
+    def create_task(self, task_id: str, telegram_id: int, repo_full: str, branch: str, status: str, objective: str, plan: dict[str, Any]) -> None:
+        self.conn.execute('''INSERT OR REPLACE INTO agent_tasks(task_id, telegram_id, repo_full, branch, status, objective, plan_json, updated_at)
+            VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)''', (task_id, telegram_id, repo_full, branch, status, objective, json.dumps(plan, ensure_ascii=False)))
+        self.conn.commit()
+        self.audit(telegram_id, 'task_create', task_id, json.dumps({'repo': repo_full, 'status': status}, ensure_ascii=False))
+
+    def update_task(self, task_id: str, status: str | None = None, result: dict[str, Any] | None = None) -> None:
+        if status is not None:
+            self.conn.execute('UPDATE agent_tasks SET status=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=?', (status, task_id))
+        if result is not None:
+            self.conn.execute('UPDATE agent_tasks SET result_json=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=?', (json.dumps(result, ensure_ascii=False), task_id))
+        self.conn.commit()
+
+    def get_task(self, task_id: str) -> dict[str, Any]:
+        row = self.conn.execute('SELECT * FROM agent_tasks WHERE task_id=?', (task_id,)).fetchone()
+        if not row:
+            return {}
+        data = dict(row)
+        for key in ('plan_json', 'result_json'):
+            try:
+                data[key] = json.loads(data.get(key) or '{}')
+            except Exception:
+                data[key] = {}
+        return data
+
+    def list_tasks(self, telegram_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        rows = self.conn.execute('SELECT * FROM agent_tasks WHERE telegram_id=? ORDER BY updated_at DESC LIMIT ?', (telegram_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def append_task_log(self, telegram_id: int, repo_full: str, step: str, message: str) -> None:
+        self.conn.execute('INSERT INTO agent_task_logs(telegram_id, repo_full, step, message) VALUES(?,?,?,?)', (telegram_id, repo_full, step, message[:3500]))
+        self.conn.commit()
+
+    def task_logs(self, telegram_id: int, repo_full: str | None = None, limit: int = 30) -> list[dict[str, Any]]:
+        if repo_full:
+            rows = self.conn.execute('SELECT * FROM agent_task_logs WHERE telegram_id=? AND repo_full=? ORDER BY id DESC LIMIT ?', (telegram_id, repo_full, limit)).fetchall()
+        else:
+            rows = self.conn.execute('SELECT * FROM agent_task_logs WHERE telegram_id=? ORDER BY id DESC LIMIT ?', (telegram_id, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+    def upsert_memory(self, telegram_id: int, repo_full: str, branch: str, path: str, summary: str, language: str = '') -> None:
+        self.conn.execute('''INSERT INTO repo_memory(telegram_id, repo_full, branch, path, language, summary)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(telegram_id, repo_full, branch, path) DO UPDATE SET
+              language=excluded.language, summary=excluded.summary, updated_at=CURRENT_TIMESTAMP''',
+            (telegram_id, repo_full, branch, path, language, summary))
+        self.conn.commit()
+
+    def memory_status(self, telegram_id: int, repo_full: str | None = None) -> dict[str, Any]:
+        if repo_full:
+            rows = self.conn.execute('SELECT language, COUNT(*) AS c FROM repo_memory WHERE telegram_id=? AND repo_full=? GROUP BY language', (telegram_id, repo_full)).fetchall()
+            total = self.conn.execute('SELECT COUNT(*) AS c FROM repo_memory WHERE telegram_id=? AND repo_full=?', (telegram_id, repo_full)).fetchone()['c']
+        else:
+            rows = self.conn.execute('SELECT language, COUNT(*) AS c FROM repo_memory WHERE telegram_id=? GROUP BY language', (telegram_id,)).fetchall()
+            total = self.conn.execute('SELECT COUNT(*) AS c FROM repo_memory WHERE telegram_id=?', (telegram_id,)).fetchone()['c']
+        return {'telegram_id': telegram_id, 'repo_full': repo_full or '', 'total_chunks': total, 'languages': {r['language'] or 'Text': r['c'] for r in rows}}
+
+    def forget_memory(self, telegram_id: int, repo_full: str | None = None) -> int:
+        if repo_full:
+            cur = self.conn.execute('DELETE FROM repo_memory WHERE telegram_id=? AND repo_full=?', (telegram_id, repo_full))
+        else:
+            cur = self.conn.execute('DELETE FROM repo_memory WHERE telegram_id=?', (telegram_id,))
+        self.conn.commit()
+        return cur.rowcount or 0
+
+    def set_last_error(self, telegram_id: int, repo_full: str, branch: str, source: str, error: str) -> None:
+        self.conn.execute('''INSERT INTO last_errors(telegram_id, repo_full, branch, source, error) VALUES(?,?,?,?,?)
+            ON CONFLICT(telegram_id, repo_full) DO UPDATE SET
+              branch=excluded.branch, source=excluded.source, error=excluded.error, updated_at=CURRENT_TIMESTAMP''',
+            (telegram_id, repo_full, branch, source, error[:5000]))
+        self.conn.commit()
+
+    def get_last_error(self, telegram_id: int, repo_full: str) -> dict[str, Any]:
+        row = self.conn.execute('SELECT * FROM last_errors WHERE telegram_id=? AND repo_full=?', (telegram_id, repo_full)).fetchone()
+        return dict(row) if row else {}
+
+    # -------------------------
+    # Multistreaming helpers
+    # -------------------------
+    def ensure_streaming_tables(self) -> None:
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS stream_platforms (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            platform_type TEXT NOT NULL,
+            rtmp_url TEXT NOT NULL,
+            stream_key_enc TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(telegram_id, name)
+        )''')
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS stream_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            source TEXT NOT NULL,
+            source_type TEXT NOT NULL,
+            status TEXT NOT NULL,
+            destinations_json TEXT DEFAULT '[]',
+            pid INTEGER,
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            ended_at TEXT,
+            error TEXT DEFAULT ''
+        )''')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_stream_platforms_user_enabled ON stream_platforms(telegram_id, enabled)')
+        self.conn.execute('CREATE INDEX IF NOT EXISTS idx_stream_history_user_status ON stream_history(telegram_id, status)')
+        self.conn.commit()
+
+    def add_stream_platform(self, telegram_id: int, name: str, platform_type: str, rtmp_url: str, stream_key: str, enabled: bool = True) -> None:
+        self.ensure_streaming_tables()
+        self.conn.execute('''INSERT INTO stream_platforms(telegram_id, name, platform_type, rtmp_url, stream_key_enc, enabled)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(telegram_id, name) DO UPDATE SET
+              platform_type=excluded.platform_type, rtmp_url=excluded.rtmp_url,
+              stream_key_enc=excluded.stream_key_enc, enabled=excluded.enabled, updated_at=CURRENT_TIMESTAMP''',
+            (telegram_id, name.strip(), platform_type.upper().strip(), rtmp_url.strip().rstrip('/'), self.encrypt(stream_key.strip()), 1 if enabled else 0))
+        self.conn.commit()
+        self.audit(telegram_id, 'stream_platform_upsert', name, platform_type)
+
+    def list_stream_platforms(self, telegram_id: int, enabled_only: bool = False, reveal_keys: bool = False) -> list[dict[str, Any]]:
+        self.ensure_streaming_tables()
+        if enabled_only:
+            rows = self.conn.execute('SELECT * FROM stream_platforms WHERE telegram_id=? AND enabled=1 ORDER BY id DESC', (telegram_id,)).fetchall()
+        else:
+            rows = self.conn.execute('SELECT * FROM stream_platforms WHERE telegram_id=? ORDER BY id DESC', (telegram_id,)).fetchall()
+        items = []
+        for r in rows:
+            d = dict(r)
+            key = self.decrypt(d.get('stream_key_enc')) if reveal_keys else ''
+            d['stream_key'] = key
+            d.pop('stream_key_enc', None)
+            items.append(d)
+        return items
+
+    def get_stream_platforms_by_ids(self, telegram_id: int, ids: list[int]) -> list[dict[str, Any]]:
+        self.ensure_streaming_tables()
+        if not ids:
+            return []
+        placeholders = ','.join('?' for _ in ids)
+        rows = self.conn.execute(f'SELECT * FROM stream_platforms WHERE telegram_id=? AND enabled=1 AND id IN ({placeholders})', (telegram_id, *ids)).fetchall()
+        items = []
+        for r in rows:
+            d = dict(r)
+            d['stream_key'] = self.decrypt(d.get('stream_key_enc'))
+            d.pop('stream_key_enc', None)
+            items.append(d)
+        return items
+
+    def set_stream_platform_enabled(self, telegram_id: int, platform_id: int, enabled: bool) -> None:
+        self.ensure_streaming_tables()
+        self.conn.execute('UPDATE stream_platforms SET enabled=?, updated_at=CURRENT_TIMESTAMP WHERE telegram_id=? AND id=?', (1 if enabled else 0, telegram_id, platform_id))
+        self.conn.commit()
+
+    def delete_stream_platform(self, telegram_id: int, platform_id: int) -> None:
+        self.ensure_streaming_tables()
+        self.conn.execute('DELETE FROM stream_platforms WHERE telegram_id=? AND id=?', (telegram_id, platform_id))
+        self.conn.commit()
+
+    def create_stream_history(self, telegram_id: int, title: str, source: str, source_type: str, status: str, destinations: list[dict[str, Any]], pid: int | None = None) -> int:
+        self.ensure_streaming_tables()
+        cur = self.conn.execute('''INSERT INTO stream_history(telegram_id, title, source, source_type, status, destinations_json, pid)
+            VALUES(?,?,?,?,?,?,?)''', (telegram_id, title, source, source_type, status, json.dumps(destinations, ensure_ascii=False), pid))
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def update_stream_history(self, stream_id: int, status: str | None = None, pid: int | None = None, error: str = '', ended: bool = False) -> None:
+        self.ensure_streaming_tables()
+        if status is not None:
+            self.conn.execute('UPDATE stream_history SET status=? WHERE id=?', (status, stream_id))
+        if pid is not None:
+            self.conn.execute('UPDATE stream_history SET pid=? WHERE id=?', (pid, stream_id))
+        if error:
+            self.conn.execute('UPDATE stream_history SET error=? WHERE id=?', (error[:2000], stream_id))
+        if ended:
+            self.conn.execute('UPDATE stream_history SET ended_at=CURRENT_TIMESTAMP WHERE id=?', (stream_id,))
+        self.conn.commit()
+
+    def latest_stream_history(self, telegram_id: int, limit: int = 5) -> list[dict[str, Any]]:
+        self.ensure_streaming_tables()
+        rows = self.conn.execute('SELECT * FROM stream_history WHERE telegram_id=? ORDER BY id DESC LIMIT ?', (telegram_id, limit)).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            try:
+                d['destinations'] = json.loads(d.get('destinations_json') or '[]')
+            except Exception:
+                d['destinations'] = []
+            result.append(d)
+        return result
+

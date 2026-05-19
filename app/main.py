@@ -25,6 +25,10 @@ from app.services.ai.gateway import AIGateway
 from app.services.downloads import download_direct_url, classify_url
 from app.services.google_drive import GoogleDriveClient
 from app.services.repo_replacer import parse_replace_options, replace_repository_from_archive, ReplaceOptions
+from app.agent.planner import build_plan
+from app.agent.executor import execute_plan
+from app.agent.memory import index_repository_memory, memory_status
+from app.services.streaming import streaming_manager
 
 settings = get_settings()
 
@@ -101,6 +105,16 @@ class TerminalRequest(RepoContext):
     command: str
     workdir: str = '.'
     commit_changes: bool = False
+
+
+class TaskRunRequest(RepoContext):
+    telegram_id: int
+    objective: str
+    approve: bool = True
+
+
+class MemoryIndexRequest(RepoContext):
+    telegram_id: int
 
 
 class SupabaseSqlRequest(BaseModel):
@@ -208,6 +222,11 @@ async def on_startup() -> None:
 async def on_shutdown() -> None:
     logger.info('Application shutdown started')
 
+    try:
+        await streaming_manager.stop()
+    except Exception:
+        logger.exception('Failed to stop streaming manager during shutdown')
+
     if bot:
         await bot.session.close()
 
@@ -227,6 +246,11 @@ async def health() -> dict[str, Any]:
         'agent_terminal_enabled': settings.agent_allow_terminal,
         'connectors_enabled': settings.connectors_enabled,
         'ai_gateway_default_provider': settings.ai_default_provider,
+        'agent_mode': settings.agent_mode,
+        'memory_enabled': settings.memory_enabled,
+        'sandbox_mode': settings.agent_sandbox_mode,
+        'streaming_enabled': True,
+        'streaming_status': streaming_manager.status(),
     }
 
 
@@ -308,6 +332,19 @@ async def telegram_webhook_legacy(
         secret=secret,
         x_telegram_bot_api_secret_token=x_telegram_bot_api_secret_token,
     )
+
+
+
+
+@app.get('/api/streaming/status', dependencies=[Depends(require_admin)])
+async def api_streaming_status() -> dict[str, Any]:
+    return {'ok': True, 'stream': streaming_manager.status()}
+
+
+@app.post('/api/streaming/stop', dependencies=[Depends(require_admin)])
+async def api_streaming_stop() -> dict[str, Any]:
+    ok = await streaming_manager.stop()
+    return {'ok': ok, 'stream': streaming_manager.status()}
 
 
 @app.get('/', response_class=HTMLResponse)
@@ -635,6 +672,39 @@ async def api_gdrive_upload_url(req: DriveUploadUrlRequest):
     result = await download_direct_url(req.url, Path(settings.work_dir) / 'api_downloads', '', allow_html=settings.download_allow_html)
     up = await GoogleDriveClient(token, folder_id=(meta or {}).get('folder_id', '') or settings.google_drive_folder_id).upload_file(result.path, folder_id=req.folder_id, share_email=req.email)
     return {'ok': True, 'file': up.__dict__}
+
+
+@app.post('/api/agent/plan', dependencies=[Depends(require_agent_api)])
+async def api_agent_plan(req: TaskRunRequest):
+    plan = await build_plan(store, req.telegram_id, req.objective)
+    return {'ok': True, 'plan': {'objective': plan.objective, 'steps': [s.__dict__ for s in plan.steps], 'requires_approval': plan.requires_approval, 'raw': plan.raw}}
+
+
+@app.post('/api/agent/run-task', dependencies=[Depends(require_agent_api)])
+async def api_agent_run_task(req: TaskRunRequest):
+    client = client_from_token(req.token)
+    owner, repo = parse_repo(req.repo)
+    plan = await build_plan(store, req.telegram_id, req.objective)
+    result = await execute_plan(store, req.telegram_id, client, owner, repo, req.branch, plan)
+    return {'ok': result.get('ok'), 'plan': {'objective': plan.objective, 'steps': [s.__dict__ for s in plan.steps]}, 'result': result}
+
+
+@app.post('/api/agent/index-repo', dependencies=[Depends(require_agent_api)])
+async def api_agent_index_repo(req: MemoryIndexRequest):
+    client = client_from_token(req.token)
+    owner, repo = parse_repo(req.repo)
+    report = await index_repository_memory(store, req.telegram_id, client, owner, repo, req.branch)
+    return {'ok': True, 'report': report.__dict__}
+
+
+@app.get('/api/agent/memory/status', dependencies=[Depends(require_agent_api)])
+async def api_agent_memory_status(telegram_id: int, repo_full: str = ''):
+    return {'ok': True, 'status': memory_status(store, telegram_id, repo_full or None)}
+
+
+@app.get('/api/agent/tasks', dependencies=[Depends(require_agent_api)])
+async def api_agent_tasks(telegram_id: int):
+    return {'ok': True, 'tasks': store.list_tasks(telegram_id, 20)}
 
 
 @app.exception_handler(GitHubError)

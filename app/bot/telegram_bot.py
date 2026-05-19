@@ -26,11 +26,18 @@ from app.services.ai.gateway import AIGateway
 from app.services.downloads import download_direct_url, android_package_report, classify_url
 from app.services.google_drive import GoogleDriveClient
 from app.services.repo_replacer import parse_replace_options, replace_repository_from_archive
+from app.agent.planner import build_plan, AgentPlan, AgentStep
+from app.agent.executor import execute_plan
+from app.agent.memory import index_repository_memory, memory_status
+from app.agent.sandbox import sandbox_run_github_actions
+from app.services.streaming import streaming_manager
 
 router = Router()
 store = Store()
 settings = get_settings()
 PENDING_TERMINAL: dict[int, dict] = {}
+PENDING_PLANS: dict[int, dict] = {}
+PENDING_STREAMS: dict[int, dict] = {}
 
 
 def is_owner(user_id: int) -> bool:
@@ -48,8 +55,11 @@ def menu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text='⬆️ رفع ملف', callback_data='help_upload')],
         [InlineKeyboardButton(text='🧠 Supabase', callback_data='help_supabase'), InlineKeyboardButton(text='🧾 الأوامر', callback_data='help_commands')],
         [InlineKeyboardButton(text='🤖 Agent', callback_data='help_agent'), InlineKeyboardButton(text='💻 Terminal', callback_data='help_terminal')],
+        [InlineKeyboardButton(text='🧠 خطة/مهام', callback_data='help_tasks'), InlineKeyboardButton(text='🧩 ذاكرة المشروع', callback_data='help_memory')],
+        [InlineKeyboardButton(text='🛠️ إصلاح ذاتي', callback_data='help_autofix'), InlineKeyboardButton(text='🧪 Sandbox', callback_data='help_sandbox')],
         [InlineKeyboardButton(text='🌐 Connectors', callback_data='help_connectors'), InlineKeyboardButton(text='🧠 AI Gateway', callback_data='help_ai')],
         [InlineKeyboardButton(text='📥 Download Center', callback_data='help_downloads'), InlineKeyboardButton(text='☁️ Google Drive', callback_data='help_gdrive')],
+        [InlineKeyboardButton(text='🎥 بث مباشر', callback_data='stream_menu')],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -736,6 +746,8 @@ async def _execute_terminal_payload(message: Message, payload: dict) -> None:
         commit_changes=False,
         progress=progress,
     )
+    if not result.ok:
+        store.set_last_error(message.from_user.id, f"{payload['owner']}/{payload['repo_name']}", payload['branch'], 'terminal', (result.logs or str(result.conclusion))[-5000:])
     icon = '✅' if result.ok else '❌'
     await message.answer(
         f'{icon} <b>نتيجة الطرفية</b>\n'
@@ -765,6 +777,306 @@ async def approve_terminal(message: Message):
 async def cancel_terminal(message: Message):
     PENDING_TERMINAL.pop(message.from_user.id, None)
     await message.answer('تم إلغاء أمر الطرفية المعلّق.')
+
+
+# -------------------------
+# Manus-like Planner / Memory / Self-healing commands
+# -------------------------
+
+def _plan_to_dict(plan: AgentPlan) -> dict:
+    return {
+        'objective': plan.objective,
+        'requires_approval': plan.requires_approval,
+        'raw': plan.raw,
+        'steps': [{'order': s.order, 'action': s.action, 'args': s.args, 'description': s.description} for s in plan.steps],
+    }
+
+
+def _plan_from_dict(data: dict) -> AgentPlan:
+    steps = [AgentStep(int(x.get('order') or i + 1), str(x.get('action') or ''), x.get('args') or {}, x.get('description') or '') for i, x in enumerate(data.get('steps') or [])]
+    return AgentPlan(str(data.get('objective') or ''), steps, bool(data.get('requires_approval', True)), str(data.get('raw') or ''))
+
+
+def _new_task_id(uid: int) -> str:
+    import secrets
+    return f'task_{uid}_{secrets.token_hex(4)}'
+
+
+@router.message(Command('plan'))
+async def plan_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        repo_value, objective = parse_repo_and_body(message.text, '/plan')
+        if not objective:
+            await message.answer('استخدم:\n<code>/plan https://github.com/OWNER/REPO\nافحص المشروع وشغل build واقترح الإصلاح</code>')
+            return
+        client, user = get_client_for(message)
+        target_repo = repo_value or user.get('repo')
+        if not target_repo:
+            raise GitHubError('لا يوجد مستودع. استخدم /switch_repo أو ضع الرابط بعد /plan.')
+        owner, repo = parse_repo(target_repo)
+        branch = user.get('branch') or settings.github_default_branch
+        progress = Progress(message, 'تخطيط مهمة Agent')
+        await progress.start()
+        await progress('🧠 بناء خطة تنفيذ آمنة...')
+        plan = await build_plan(store, message.from_user.id, objective)
+        task_id = _new_task_id(message.from_user.id)
+        repo_full = f'{owner}/{repo}'
+        store.create_task(task_id, message.from_user.id, repo_full, branch, 'planned', objective, _plan_to_dict(plan))
+        PENDING_PLANS[message.from_user.id] = {'task_id': task_id, 'repo': target_repo, 'owner': owner, 'repo_name': repo, 'branch': branch, 'plan': _plan_to_dict(plan)}
+        await progress('✅ الخطة جاهزة وتنتظر موافقتك')
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text='✅ تنفيذ الخطة', callback_data=f'approve_plan:{task_id}'), InlineKeyboardButton(text='❌ إلغاء', callback_data=f'cancel_task:{task_id}')],
+            [InlineKeyboardButton(text='📜 سجلات المهام', callback_data='cmd_task_logs')],
+        ])
+        await message.answer(f'<b>Task ID:</b> <code>{task_id}</code>\n' + plan.telegram_text(), reply_markup=keyboard)
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('run_task'))
+@router.message(Command('task'))
+async def run_task_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        cmd = '/run_task' if message.text.startswith('/run_task') else '/task'
+        repo_value, objective = parse_repo_and_body(message.text, cmd)
+        if not objective:
+            await message.answer('استخدم:\n<code>/task https://github.com/OWNER/REPO\n1. حلل المشروع\n2. شغل build\n3. أصلح الخطأ</code>')
+            return
+        client, user = get_client_for(message)
+        target_repo = repo_value or user.get('repo')
+        if not target_repo:
+            raise GitHubError('لا يوجد مستودع. استخدم /switch_repo أو ضع الرابط بعد /task.')
+        owner, repo = parse_repo(target_repo)
+        branch = user.get('branch') or settings.github_default_branch
+        progress = Progress(message, 'Agent Task Runner')
+        await progress.start()
+        await progress('🧠 بناء الخطة...')
+        plan = await build_plan(store, message.from_user.id, objective)
+        task_id = _new_task_id(message.from_user.id)
+        repo_full = f'{owner}/{repo}'
+        store.create_task(task_id, message.from_user.id, repo_full, branch, 'planned', objective, _plan_to_dict(plan))
+        if settings.agent_require_plan_approval:
+            PENDING_PLANS[message.from_user.id] = {'task_id': task_id, 'repo': target_repo, 'owner': owner, 'repo_name': repo, 'branch': branch, 'plan': _plan_to_dict(plan)}
+            await progress('⏸️ الخطة تنتظر الموافقة')
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ تنفيذ الآن', callback_data=f'approve_plan:{task_id}'), InlineKeyboardButton(text='❌ إلغاء', callback_data=f'cancel_task:{task_id}')]])
+            await message.answer(f'<b>Task ID:</b> <code>{task_id}</code>\n' + plan.telegram_text(), reply_markup=keyboard)
+            return
+        store.update_task(task_id, 'running')
+        result = await execute_plan(store, message.from_user.id, client, owner, repo, branch, plan, progress)
+        store.update_task(task_id, 'done' if result.get('ok') else 'failed', result)
+        await progress('✅ انتهت المهمة' if result.get('ok') else '❌ فشلت المهمة')
+        await message.answer('<pre>' + html.escape(json.dumps(result, ensure_ascii=False, indent=2)[-3500:]) + '</pre>')
+    except Exception as e:
+        await send_error(message, e)
+
+
+async def _execute_pending_plan(message: Message, task_id: str) -> None:
+    payload = PENDING_PLANS.get(message.from_user.id)
+    if not payload or payload.get('task_id') != task_id:
+        task = store.get_task(task_id)
+        if not task:
+            raise GitHubError('لا توجد خطة معلقة بهذا Task ID.')
+        owner, repo = parse_repo(task['repo_full'])
+        payload = {'task_id': task_id, 'owner': owner, 'repo_name': repo, 'branch': task.get('branch') or settings.github_default_branch, 'plan': task['plan_json']}
+    client, _user = get_client_for(message)
+    plan = _plan_from_dict(payload['plan'])
+    progress = Progress(message, f'تنفيذ {task_id}')
+    await progress.start()
+    store.update_task(task_id, 'running')
+    result = await execute_plan(store, message.from_user.id, client, payload['owner'], payload['repo_name'], payload['branch'], plan, progress)
+    store.update_task(task_id, 'done' if result.get('ok') else 'failed', result)
+    PENDING_PLANS.pop(message.from_user.id, None)
+    await progress('✅ انتهت المهمة' if result.get('ok') else '❌ فشلت المهمة')
+    await message.answer('<b>Task result:</b> <code>' + html.escape(task_id) + '</code>\n<pre>' + html.escape(json.dumps(result, ensure_ascii=False, indent=2)[-3500:]) + '</pre>')
+
+
+@router.message(Command('approve_plan'))
+async def approve_plan_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        task_id = message.text.replace('/approve_plan', '', 1).strip()
+        if not task_id:
+            pending = PENDING_PLANS.get(message.from_user.id) or {}
+            task_id = pending.get('task_id', '')
+        if not task_id:
+            await message.answer('لا توجد خطة معلّقة. استخدم /plan أو /task أولًا.')
+            return
+        await _execute_pending_plan(message, task_id)
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('task_status'))
+async def task_status_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    task_id = message.text.replace('/task_status', '', 1).strip()
+    if task_id:
+        task = store.get_task(task_id)
+        await message.answer('<pre>' + html.escape(json.dumps(task or {'error': 'not found'}, ensure_ascii=False, indent=2)[:3500]) + '</pre>')
+        return
+    tasks = store.list_tasks(message.from_user.id, 10)
+    lines = ['<b>آخر المهام:</b>']
+    for t in tasks:
+        lines.append(f"• <code>{html.escape(t['task_id'])}</code> {html.escape(t['status'])} — {html.escape(t.get('repo_full') or '')}")
+    await message.answer('\n'.join(lines) if len(lines) > 1 else 'لا توجد مهام بعد.')
+
+
+@router.message(Command('task_logs'))
+async def task_logs_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    session = store.get_session(message.from_user.id)
+    repo_full = f"{session.get('owner')}/{session.get('repo')}" if session else None
+    rows = store.task_logs(message.from_user.id, repo_full, 30)
+    if not rows:
+        await message.answer('لا توجد سجلات بعد.')
+        return
+    lines = ['<b>سجلات Agent:</b>']
+    for r in rows[:20]:
+        lines.append(f"• <code>{html.escape(r.get('step') or '')}</code> {html.escape((r.get('message') or '')[:250])}")
+    await message.answer('\n'.join(lines)[:3900])
+
+
+@router.message(Command('task_cancel'))
+async def task_cancel_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    task_id = message.text.replace('/task_cancel', '', 1).strip()
+    if task_id:
+        store.update_task(task_id, 'cancelled')
+    PENDING_PLANS.pop(message.from_user.id, None)
+    await message.answer('✅ تم إلغاء المهمة أو الخطة المعلقة.')
+
+
+@router.message(Command('index_repo'))
+async def index_repo_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        repo_value = message.text.replace('/index_repo', '', 1).strip()
+        client, user = get_client_for(message)
+        target = repo_value or user.get('repo')
+        if not target:
+            raise GitHubError('حدد مستودعًا أو استخدم /switch_repo أولًا.')
+        owner, repo = parse_repo(target)
+        branch = user.get('branch') or settings.github_default_branch
+        progress = Progress(message, 'فهرسة ذاكرة المستودع')
+        await progress.start()
+        await progress('🔎 قراءة ملفات المستودع وبناء ذاكرة SQLite...')
+        report = await index_repository_memory(store, message.from_user.id, client, owner, repo, branch)
+        await progress('✅ اكتملت الفهرسة')
+        await message.answer(report.telegram_text())
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('memory_status'))
+async def memory_status_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    session = store.get_session(message.from_user.id)
+    repo_full = f"{session.get('owner')}/{session.get('repo')}" if session else None
+    status = memory_status(store, message.from_user.id, repo_full)
+    await message.answer('<pre>' + html.escape(json.dumps(status, ensure_ascii=False, indent=2)) + '</pre>')
+
+
+@router.message(Command('forget_repo_memory'))
+async def forget_repo_memory_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    session = store.get_session(message.from_user.id)
+    repo_full = f"{session.get('owner')}/{session.get('repo')}" if session else None
+    n = store.forget_memory(message.from_user.id, repo_full)
+    await message.answer(f'✅ تم حذف {n} عنصرًا من ذاكرة هذا المستودع.')
+
+
+@router.message(Command('fix_last_error'))
+async def fix_last_error_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        client, user = get_client_for(message)
+        if not user.get('repo'):
+            raise GitHubError('حدد مستودعًا أولًا.')
+        owner, repo = parse_repo(user['repo'])
+        repo_full = f'{owner}/{repo}'
+        err = store.get_last_error(message.from_user.id, repo_full)
+        if not err:
+            await message.answer('لا يوجد خطأ محفوظ. شغل /term أو /task أولًا ثم استخدم هذا الأمر.')
+            return
+        provider, token, base_url, model = store.get_ai_token(message.from_user.id)
+        prompt = 'حلل هذا الخطأ في مشروع GitHub واقترح Patch عملي مختصر، ولا تخترع ملفات غير مذكورة:\n' + json.dumps(err, ensure_ascii=False, indent=2)
+        if token:
+            response = await AIGateway(provider, token, base_url, model).ask(prompt, 'You are a senior debugging agent. Return concrete steps and code-level hints.', 0.1)
+            await message.answer('🛠️ <b>تحليل الخطأ الأخير</b>\n' + html.escape(response.text[:3500]))
+        else:
+            await message.answer('🛠️ <b>آخر خطأ محفوظ</b>\n<pre>' + html.escape(json.dumps(err, ensure_ascii=False, indent=2)[:3500]) + '</pre>\nاربط AI عبر /ai_connect ليقترح الإصلاح تلقائيًا.')
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('autofix'))
+async def autofix_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        client, user = get_client_for(message)
+        if not user.get('repo'):
+            raise GitHubError('حدد مستودعًا أولًا.')
+        owner, repo = parse_repo(user['repo'])
+        branch = user.get('branch') or settings.github_default_branch
+        repo_full = f'{owner}/{repo}'
+        err = store.get_last_error(message.from_user.id, repo_full)
+        if not err:
+            await message.answer('لا يوجد خطأ محفوظ لهذا المستودع.')
+            return
+        objective = 'اقرأ آخر خطأ، افحص المشروع، اقترح إصلاحًا آمنًا، ثم شغل اختبار build. الخطأ: ' + str(err.get('error',''))[:1200]
+        progress = Progress(message, 'Autofix Planner')
+        await progress.start()
+        await progress('🧠 بناء خطة إصلاح ذاتي آمنة...')
+        plan = await build_plan(store, message.from_user.id, objective)
+        task_id = _new_task_id(message.from_user.id)
+        store.create_task(task_id, message.from_user.id, repo_full, branch, 'planned', objective, _plan_to_dict(plan))
+        PENDING_PLANS[message.from_user.id] = {'task_id': task_id, 'repo': user['repo'], 'owner': owner, 'repo_name': repo, 'branch': branch, 'plan': _plan_to_dict(plan)}
+        await progress('⏸️ الخطة تنتظر موافقتك')
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text='✅ تنفيذ خطة الإصلاح', callback_data=f'approve_plan:{task_id}'), InlineKeyboardButton(text='❌ إلغاء', callback_data=f'cancel_task:{task_id}')]])
+        await message.answer(f'<b>Task ID:</b> <code>{task_id}</code>\n' + plan.telegram_text(), reply_markup=keyboard)
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('sandbox_run'))
+@router.message(Command('codeact'))
+async def sandbox_run_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        cmd = '/codeact' if message.text.startswith('/codeact') else '/sandbox_run'
+        repo_value, command = parse_repo_and_body(message.text, cmd)
+        if not command:
+            await message.answer('استخدم:\n<code>/sandbox_run https://github.com/OWNER/REPO\npython -m compileall app</code>')
+            return
+        validate_command(command)
+        client, user = get_client_for(message)
+        target = repo_value or user.get('repo')
+        if not target:
+            raise GitHubError('حدد مستودعًا أو استخدم /switch_repo أولًا.')
+        owner, repo = parse_repo(target)
+        branch = user.get('branch') or settings.github_default_branch
+        progress = Progress(message, 'Sandbox عبر GitHub Actions')
+        await progress.start()
+        result = await sandbox_run_github_actions(client, owner, repo, branch, command, settings.agent_default_workdir, progress)
+        if not result.ok:
+            store.set_last_error(message.from_user.id, f'{owner}/{repo}', branch, 'sandbox_run', result.logs[-5000:])
+        await message.answer(('✅' if result.ok else '❌') + ' <b>Sandbox result</b>\n<pre>' + html.escape(result.logs[-3500:]) + '</pre>')
+    except Exception as e:
+        await send_error(message, e)
 
 
 @router.message(Command('codespace'))
@@ -1303,6 +1615,279 @@ async def ask_ai_cmd(message: Message):
         await send_error(message, e)
 
 
+
+
+# -------------------------
+# Multistreaming bot section
+# -------------------------
+def _stream_menu_text(uid: int) -> str:
+    status = streaming_manager.status()
+    platforms = store.list_stream_platforms(uid)
+    lines = [
+        '<b>🎥 مركز البث المباشر</b>',
+        '',
+        f"الحالة: <b>{'نشط ✅' if status.get('active') else 'متوقف ⚫'}</b>",
+        f"عدد المنصات المحفوظة: <b>{len(platforms)}</b>",
+        '',
+        '<b>الأوامر:</b>',
+        '• <code>/stream_platform اسم النوع RTMP_URL STREAM_KEY</code>',
+        '• <code>/stream_start رابط_يوتيوب_أو_مسار_ملف</code>',
+        '• <code>/stream_status</code>',
+        '• <code>/stream_stop</code>',
+        '',
+        'الأنواع: <code>facebook x instagram telegram custom</code>',
+    ]
+    return '\n'.join(lines)
+
+
+def _stream_keyboard(active: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text='🎬 بدء بث', callback_data='stream_start_help'), InlineKeyboardButton(text='📊 الحالة', callback_data='stream_status')],
+        [InlineKeyboardButton(text='🔑 المنصات', callback_data='stream_platforms'), InlineKeyboardButton(text='➕ إضافة منصة', callback_data='stream_add_help')],
+    ]
+    if active:
+        rows.append([InlineKeyboardButton(text='🛑 إيقاف البث', callback_data='stream_stop')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _platform_url(row: dict) -> str:
+    base = str(row.get('rtmp_url') or '').rstrip('/')
+    key = str(row.get('stream_key') or '').strip()
+    return f'{base}/{key}'
+
+
+def _select_platforms_keyboard(uid: int, selected: set[int]) -> InlineKeyboardMarkup:
+    platforms = store.list_stream_platforms(uid, enabled_only=True)
+    rows = []
+    for p in platforms:
+        pid = int(p['id'])
+        mark = '✅' if pid in selected else '⬜'
+        rows.append([InlineKeyboardButton(text=f"{mark} {p['platform_type']} · {p['name']}", callback_data=f'stream_toggle:{pid}')])
+    rows.append([InlineKeyboardButton(text='🚀 تشغيل الآن', callback_data='stream_confirm'), InlineKeyboardButton(text='❌ إلغاء', callback_data='stream_cancel')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Command('stream'))
+async def stream_menu_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    await message.answer(_stream_menu_text(message.from_user.id), reply_markup=_stream_keyboard(streaming_manager.is_active()))
+
+
+@router.message(Command('stream_platform'))
+async def stream_platform_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        rest = message.text.replace('/stream_platform', '', 1).strip()
+        parts = rest.split(maxsplit=3)
+        if len(parts) < 4:
+            await message.answer('استخدم:\n<code>/stream_platform Facebook facebook rtmps://live-api-s.facebook.com:443/rtmp STREAM_KEY</code>')
+            return
+        name, platform_type, rtmp_url, stream_key = parts
+        if not (rtmp_url.startswith('rtmp://') or rtmp_url.startswith('rtmps://')):
+            await message.answer('❌ RTMP URL يجب أن يبدأ بـ rtmp:// أو rtmps://')
+            return
+        store.add_stream_platform(message.from_user.id, name, platform_type, rtmp_url, stream_key)
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        await message.answer(f'✅ تم حفظ منصة البث <b>{html.escape(name)}</b> وتشفير المفتاح محليًا.')
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(Command('stream_platforms'))
+async def stream_platforms_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    platforms = store.list_stream_platforms(message.from_user.id)
+    if not platforms:
+        await message.answer('لا توجد منصات محفوظة. استخدم /stream_platform لإضافة وجهة RTMP.')
+        return
+    lines = ['<b>🔑 منصات البث المحفوظة</b>']
+    for p in platforms:
+        lines.append(f"#{p['id']} {'✅' if p['enabled'] else '⛔'} <b>{html.escape(p['name'])}</b> · <code>{html.escape(p['platform_type'])}</code> · <code>{html.escape(p['rtmp_url'])}</code>")
+    await message.answer('\n'.join(lines)[:3900])
+
+
+@router.message(Command('stream_start'))
+async def stream_start_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    source = message.text.replace('/stream_start', '', 1).strip()
+    if not source:
+        await message.answer('أرسل المصدر:\n<code>/stream_start https://youtube.com/watch?v=...</code>\nأو\n<code>/stream_start /app/media/video.mp4</code>')
+        return
+    platforms = store.list_stream_platforms(message.from_user.id, enabled_only=True)
+    if not platforms:
+        await message.answer('❌ لا توجد منصات مفعلة. أضف منصة أولًا عبر /stream_platform')
+        return
+    PENDING_STREAMS[message.from_user.id] = {'source': source, 'selected': set()}
+    await message.answer('اختر وجهات البث:', reply_markup=_select_platforms_keyboard(message.from_user.id, set()))
+
+
+@router.message(Command('stream_status'))
+async def stream_status_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    status = streaming_manager.status()
+    history = store.latest_stream_history(message.from_user.id, limit=3)
+    lines = [
+        '<b>📊 حالة البث</b>',
+        f"نشط: <b>{'نعم ✅' if status.get('active') else 'لا ⚫'}</b>",
+        f"الحالة: <code>{html.escape(str(status.get('status', 'offline')))}</code>",
+        f"PID: <code>{html.escape(str(status.get('pid') or '-'))}</code>",
+        f"الوجهات: <b>{status.get('destinations_count', 0)}</b>",
+    ]
+    if status.get('error'):
+        lines.append(f"خطأ: <code>{html.escape(str(status.get('error'))[:1000])}</code>")
+    if history:
+        lines.append('\n<b>آخر السجلات:</b>')
+        for h in history:
+            lines.append(f"#{h['id']} · <code>{html.escape(h['status'])}</code> · {html.escape(h['title'])}")
+    await message.answer('\n'.join(lines)[:3900], reply_markup=_stream_keyboard(streaming_manager.is_active()))
+
+
+@router.message(Command('stream_stop'))
+async def stream_stop_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    ok = await streaming_manager.stop()
+    await message.answer('🛑 تم إرسال أمر إيقاف البث.' if ok else 'لا يوجد بث نشط.', reply_markup=_stream_keyboard(False))
+
+
+@router.callback_query(F.data == 'stream_menu')
+async def stream_menu_cb(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        return
+    await call.answer()
+    await call.message.answer(_stream_menu_text(call.from_user.id), reply_markup=_stream_keyboard(streaming_manager.is_active()))
+
+
+@router.callback_query(F.data == 'stream_add_help')
+async def stream_add_help_cb(call: CallbackQuery):
+    await call.answer()
+    await call.message.answer('أضف منصة هكذا:\n<code>/stream_platform Facebook facebook rtmps://live-api-s.facebook.com:443/rtmp STREAM_KEY</code>')
+
+
+@router.callback_query(F.data == 'stream_start_help')
+async def stream_start_help_cb(call: CallbackQuery):
+    await call.answer()
+    await call.message.answer('ابدأ هكذا:\n<code>/stream_start https://youtube.com/watch?v=...</code>\nثم اختر المنصات بالأزرار.')
+
+
+@router.callback_query(F.data == 'stream_platforms')
+async def stream_platforms_cb(call: CallbackQuery):
+    await call.answer()
+    platforms = store.list_stream_platforms(call.from_user.id)
+    if not platforms:
+        await call.message.answer('لا توجد منصات محفوظة. استخدم /stream_platform لإضافة وجهة RTMP.')
+        return
+    lines = ['<b>🔑 منصات البث المحفوظة</b>']
+    for p in platforms:
+        lines.append(f"#{p['id']} {'✅' if p['enabled'] else '⛔'} <b>{html.escape(p['name'])}</b> · <code>{html.escape(p['platform_type'])}</code> · <code>{html.escape(p['rtmp_url'])}</code>")
+    await call.message.answer('\n'.join(lines)[:3900])
+
+
+@router.callback_query(F.data.startswith('stream_toggle:'))
+async def stream_toggle_cb(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        return
+    await call.answer()
+    pid = int(call.data.split(':', 1)[1])
+    pending = PENDING_STREAMS.setdefault(call.from_user.id, {'source': '', 'selected': set()})
+    selected: set[int] = pending.setdefault('selected', set())
+    if pid in selected:
+        selected.remove(pid)
+    else:
+        selected.add(pid)
+    await call.message.edit_reply_markup(reply_markup=_select_platforms_keyboard(call.from_user.id, selected))
+
+
+@router.callback_query(F.data == 'stream_cancel')
+async def stream_cancel_cb(call: CallbackQuery):
+    PENDING_STREAMS.pop(call.from_user.id, None)
+    await call.answer('تم الإلغاء')
+    await call.message.answer('تم إلغاء إعداد البث.', reply_markup=_stream_keyboard(streaming_manager.is_active()))
+
+
+@router.callback_query(F.data == 'stream_confirm')
+async def stream_confirm_cb(call: CallbackQuery):
+    if not is_owner(call.from_user.id):
+        return
+    await call.answer()
+    pending = PENDING_STREAMS.get(call.from_user.id) or {}
+    source = pending.get('source') or ''
+    selected = list(pending.get('selected') or [])
+    if not source:
+        await call.message.answer('❌ لا يوجد مصدر محفوظ. استخدم /stream_start من جديد.')
+        return
+    if not selected:
+        await call.message.answer('❌ اختر منصة واحدة على الأقل.')
+        return
+    rows = store.get_stream_platforms_by_ids(call.from_user.id, [int(x) for x in selected])
+    if not rows:
+        await call.message.answer('❌ لم أجد منصات مفعلة صالحة.')
+        return
+    destinations = [_platform_url(r) for r in rows]
+    title = f'Telegram multistream {time_now_short()}'
+    hist_id = store.create_stream_history(
+        telegram_id=call.from_user.id,
+        title=title,
+        source=source,
+        source_type='youtube' if ('youtube.com/' in source or 'youtu.be/' in source) else 'file_or_direct',
+        status='starting',
+        destinations=[{'id': r['id'], 'name': r['name'], 'type': r['platform_type']} for r in rows],
+    )
+    msg = await call.message.answer('⏳ جاري تشغيل FFmpeg وتجهيز البث...')
+    try:
+        session = await streaming_manager.start(source=source, destinations=destinations, title=title, prefer_copy=True)
+        async def on_stream_event(event: str, payload: dict) -> None:
+            if event == 'active':
+                store.update_stream_history(hist_id, status='active', pid=payload.get('pid'))
+                try:
+                    await msg.edit_text(f"✅ بدأ البث بنجاح.\nPID: <code>{payload.get('pid')}</code>", reply_markup=_stream_keyboard(True))
+                except Exception:
+                    pass
+            elif event == 'error':
+                store.update_stream_history(hist_id, status='failed', error=str(payload.get('error') or ''), ended=True)
+                await call.message.answer('❌ فشل البث:\n<code>' + html.escape(str(payload.get('error') or '')[:1200]) + '</code>', reply_markup=_stream_keyboard(False))
+            elif event == 'end':
+                store.update_stream_history(hist_id, status='completed', ended=True)
+        session.on(on_stream_event)
+        PENDING_STREAMS.pop(call.from_user.id, None)
+    except Exception as e:
+        store.update_stream_history(hist_id, status='failed', error=str(e), ended=True)
+        await msg.edit_text('❌ فشل تشغيل البث:\n<code>' + html.escape(str(e)[:1200]) + '</code>', reply_markup=_stream_keyboard(False))
+
+
+@router.callback_query(F.data == 'stream_status')
+async def stream_status_cb(call: CallbackQuery):
+    await call.answer()
+    status = streaming_manager.status()
+    history = store.latest_stream_history(call.from_user.id, limit=3)
+    lines = ['<b>📊 حالة البث</b>', f"نشط: <b>{'نعم ✅' if status.get('active') else 'لا ⚫'}</b>", f"الحالة: <code>{html.escape(str(status.get('status', 'offline')))}</code>"]
+    if history:
+        lines.append('\n<b>آخر السجلات:</b>')
+        for h in history:
+            lines.append(f"#{h['id']} · <code>{html.escape(h['status'])}</code> · {html.escape(h['title'])}")
+    await call.message.answer('\n'.join(lines)[:3900], reply_markup=_stream_keyboard(streaming_manager.is_active()))
+
+
+@router.callback_query(F.data == 'stream_stop')
+async def stream_stop_cb(call: CallbackQuery):
+    await call.answer()
+    ok = await streaming_manager.stop()
+    await call.message.answer('🛑 تم إرسال أمر إيقاف البث.' if ok else 'لا يوجد بث نشط.', reply_markup=_stream_keyboard(False))
+
+
+def time_now_short() -> str:
+    import datetime
+    return datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')
+
+
 @router.callback_query(F.data.startswith('help_'))
 async def help_callback(call: CallbackQuery):
     texts = {
@@ -1315,7 +1900,7 @@ async def help_callback(call: CallbackQuery):
         'help_normalize': 'لترتيب مشروع فقط وإرسال ZIP نظيف بدون رفع إلى GitHub:\nرد على الملف بالأمر <code>/normalize</code>',
         'help_upload': 'أرسل ملفًا ثم رد عليه:\n<code>/upload path/in/repo.ext</code>',
         'help_supabase': 'قراءة جدول مصرح به:\n<code>/supabase posts 10</code>',
-        'help_commands': '<code>/connections /current_repo /switch_repo /disconnect_repo /disconnect_all /info /repos /ls /read /write /delete /upload /unpack /replace /normalize /create_repo /new_branch /pr /supabase /agent /term /analyze_repo /install_workflow /codespace /connectors /connect /railway_projects /railway_set_vars /vercel_projects /ai_connect /ask_ai /download_file /apk /download_to_repo /gdrive_connect /gdrive_upload /download_to_gdrive</code>',
+        'help_commands': '<code>/connections /current_repo /switch_repo /disconnect_repo /disconnect_all /info /repos /ls /read /write /delete /upload /unpack /replace /normalize /create_repo /new_branch /pr /supabase /agent /plan /task /approve_plan /task_status /task_logs /index_repo /memory_status /fix_last_error /autofix /sandbox_run /term /analyze_repo /install_workflow /codespace /connectors /connect /railway_projects /railway_set_vars /vercel_projects /ai_connect /ask_ai /download_file /apk /download_to_repo /gdrive_connect /gdrive_upload /download_to_gdrive</code>',
         'help_agent': 'أوامر Agent:\n<code>/agent https://github.com/OWNER/REPO\nreplace app/main.py\nالمحتوى</code>\n<code>/agent ...\nmkdir app/new</code>\n<code>/analyze_repo https://github.com/OWNER/REPO</code>',
         'help_terminal': 'الطرفية تعمل عبر GitHub Actions بعد تثبيت Workflow:\n<code>/install_workflow https://github.com/OWNER/REPO</code>\nثم:\n<code>/term https://github.com/OWNER/REPO\nnpm run build</code>',
         'help_connectors': 'الموصلات:\n<code>/connect railway TOKEN</code>\n<code>/railway_projects</code>\n<code>/railway_project PROJECT_ID</code>\n<code>/railway_set_var PROJECT_ID ENV_ID SERVICE_ID KEY=VALUE</code>\n<code>/railway_set_vars PROJECT_ID ENV_ID SERVICE_ID</code> ثم ضع env في السطور التالية.\nVercel: <code>/connect vercel TOKEN</code> ثم <code>/vercel_projects</code> و <code>/vercel_set_var PROJECT production KEY=VALUE</code>',
@@ -1382,6 +1967,51 @@ async def cb_current_repo(call: CallbackQuery):
             )
     except Exception as e:
         await call.message.answer('❌ ' + html.escape(str(e))[:3500])
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith('approve_plan:'))
+async def cb_approve_plan(call: CallbackQuery):
+    try:
+        task_id = call.data.split(':', 1)[1]
+        fake = call.message
+        # call.message lacks from_user; create a tiny adapter for functions expecting Message-like object.
+        class _Adapter:
+            def __init__(self, msg, user):
+                self._msg = msg
+                self.from_user = user
+                self.chat = msg.chat
+                self.text = ''
+            async def answer(self, *args, **kwargs):
+                return await self._msg.answer(*args, **kwargs)
+        await _execute_pending_plan(_Adapter(call.message, call.from_user), task_id)
+    except Exception as e:
+        await call.message.answer('❌ ' + html.escape(str(e))[:3500])
+    await call.answer()
+
+
+@router.callback_query(F.data.startswith('cancel_task:'))
+async def cb_cancel_task(call: CallbackQuery):
+    task_id = call.data.split(':', 1)[1]
+    try:
+        store.update_task(task_id, 'cancelled')
+        PENDING_PLANS.pop(call.from_user.id, None)
+        await call.message.answer(f'✅ تم إلغاء المهمة <code>{html.escape(task_id)}</code>')
+    except Exception as e:
+        await call.message.answer('❌ ' + html.escape(str(e))[:3500])
+    await call.answer()
+
+
+@router.callback_query(F.data == 'cmd_task_logs')
+async def cb_task_logs(call: CallbackQuery):
+    rows = store.task_logs(call.from_user.id, None, 20)
+    if not rows:
+        await call.message.answer('لا توجد سجلات بعد.')
+    else:
+        lines = ['<b>سجلات Agent:</b>']
+        for r in rows[:15]:
+            lines.append(f"• <code>{html.escape(r.get('step') or '')}</code> {html.escape((r.get('message') or '')[:220])}")
+        await call.message.answer('\n'.join(lines)[:3900])
     await call.answer()
 
 

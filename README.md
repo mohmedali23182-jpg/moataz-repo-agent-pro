@@ -193,3 +193,106 @@ KEY=VALUE
 /ai_connect custom TOKEN https://api.example.com/v1/chat/completions model-name
 /ask_ai openrouter حلل هذا الخطأ
 ```
+
+## Agentic Upgrade: Planner + Memory + Sandbox
+
+This build adds real execution primitives inspired by advanced coding agents while staying deployable on Railway:
+
+### New Telegram commands
+
+```text
+/plan <repo_url optional>
+افحص المشروع وشغل build واقترح إصلاحًا
+
+/task <repo_url optional>
+1. analyze repository
+2. install workflow
+3. run npm run build
+
+/approve_plan TASK_ID
+/task_status [TASK_ID]
+/task_logs
+/task_cancel [TASK_ID]
+
+/index_repo
+/memory_status
+/forget_repo_memory
+
+/fix_last_error
+/autofix
+
+/sandbox_run <repo_url optional>
+npm run build
+
+/codeact <repo_url optional>
+python -m compileall app
+```
+
+### What is actually executed
+
+- Repository analysis uses the GitHub REST/Git Data API.
+- Terminal/Sandbox execution runs through GitHub Actions `workflow_dispatch` and returns real logs.
+- `/replace` performs a real atomic Git commit with Git Data API.
+- Memory is stored in SQLite in `repo_memory`.
+- Task state is stored in SQLite in `agent_tasks` and `agent_task_logs`.
+
+### New environment variables
+
+```env
+AGENT_MODE=planner
+AGENT_REQUIRE_PLAN_APPROVAL=true
+AGENT_MAX_STEPS=12
+AGENT_MAX_RETRIES=3
+AGENT_PROGRESS_INTERVAL_SECONDS=4
+AGENT_CODEACT_ENABLED=true
+AGENT_SANDBOX_MODE=github_actions
+AGENT_BLOCKED_COMMANDS=rm -rf,curl|bash,wget|bash,shutdown,reboot,mkfs,dd if=
+MEMORY_ENABLED=true
+MEMORY_BACKEND=sqlite
+VECTOR_MEMORY_ENABLED=false
+CHROMA_PATH=/tmp/chroma
+```
+
+
+## 🎥 قسم البث المباشر داخل نفس البوت
+
+تم دمج بوت البث كقسم داخل بوت Moataz Repo Agent نفسه، وليس كبوت ثانٍ. هذا صحيح لأن Telegram يسمح بـ webhook واحد فقط لكل توكن بوت.
+
+### أوامر البث
+
+```text
+/stream
+/stream_platform Facebook facebook rtmps://live-api-s.facebook.com:443/rtmp STREAM_KEY
+/stream_platform Telegram telegram rtmp://your-telegram-rtmp-url STREAM_KEY
+/stream_start https://youtube.com/watch?v=VIDEO_ID
+/stream_status
+/stream_stop
+```
+
+### المتطلبات
+
+- نفس `TELEGRAM_BOT_TOKEN`
+- نفس `TELEGRAM_OWNER_IDS`
+- نفس قاعدة SQLite عبر `DATABASE_PATH`
+- تثبيت `ffmpeg`
+- تثبيت `yt-dlp`
+
+مفاتيح RTMP تحفظ مشفرة داخل SQLite باستخدام `ENCRYPTION_KEY`.
+
+### متغيرات إضافية
+
+```env
+FFMPEG_PATH=ffmpeg
+YTDLP_PATH=yt-dlp
+STREAM_VIDEO_BITRATE=4500k
+STREAM_AUDIO_BITRATE=160k
+STREAM_BUFFER_SIZE=9000k
+STREAM_FPS=30
+STREAM_GOP=60
+STREAM_FALLBACK_PRESET=veryfast
+STREAM_GRACEFUL_STOP_SECONDS=8
+```
+
+### ملاحظة تشغيل
+
+على Railway يجب أن تكون الخطة والموارد مناسبة، لأن FFmpeg يستهلك CPU وBandwidth. للبث المستقر متعدد الوجهات يفضّل VPS.

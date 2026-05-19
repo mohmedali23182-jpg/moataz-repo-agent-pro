@@ -30,8 +30,8 @@ def validate_command(command: str) -> None:
     if len(command) > 2000:
         raise GitHubError('الأمر طويل جدًا.')
     lowered = command.lower()
-    for token in DANGEROUS_TOKENS:
-        if token in lowered:
+    for token in set(DANGEROUS_TOKENS).union(settings.blocked_commands):
+        if token and token.lower() in lowered:
             raise GitHubError(f'الأمر يحتوي عنصرًا خطيرًا أو غير مسموح: {token}')
     try:
         first = shlex.split(command)[0]

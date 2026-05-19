@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ca-certificates p7zip-full unrar-free libarchive-tools \
+    git curl ca-certificates p7zip-full unrar-free libarchive-tools ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .

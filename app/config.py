@@ -48,6 +48,18 @@ class Settings(BaseSettings):
     agent_allowed_commands: str = Field(default='npm,pnpm,yarn,python,pip,pytest,node,git,ls,cat,sed,grep', alias='AGENT_ALLOWED_COMMANDS')
     agent_default_workdir: str = Field(default='.', alias='AGENT_DEFAULT_WORKDIR')
     agent_workflow_file: str = Field(default='agent-command.yml', alias='AGENT_WORKFLOW_FILE')
+    agent_mode: str = Field(default='planner', alias='AGENT_MODE')
+    agent_require_plan_approval: bool = Field(default=True, alias='AGENT_REQUIRE_PLAN_APPROVAL')
+    agent_max_steps: int = Field(default=12, alias='AGENT_MAX_STEPS')
+    agent_max_retries: int = Field(default=3, alias='AGENT_MAX_RETRIES')
+    agent_progress_interval_seconds: int = Field(default=4, alias='AGENT_PROGRESS_INTERVAL_SECONDS')
+    agent_codeact_enabled: bool = Field(default=True, alias='AGENT_CODEACT_ENABLED')
+    agent_sandbox_mode: str = Field(default='github_actions', alias='AGENT_SANDBOX_MODE')
+    agent_blocked_commands: str = Field(default='rm -rf,curl|bash,wget|bash,shutdown,reboot,mkfs,dd if=', alias='AGENT_BLOCKED_COMMANDS')
+    memory_enabled: bool = Field(default=True, alias='MEMORY_ENABLED')
+    memory_backend: str = Field(default='sqlite', alias='MEMORY_BACKEND')
+    vector_memory_enabled: bool = Field(default=False, alias='VECTOR_MEMORY_ENABLED')
+    chroma_path: str = Field(default='/tmp/chroma', alias='CHROMA_PATH')
 
 
 
@@ -85,6 +97,18 @@ class Settings(BaseSettings):
     huggingface_api_key: str = Field(default='', alias='HUGGINGFACE_API_KEY')
     fireworks_api_key: str = Field(default='', alias='FIREWORKS_API_KEY')
 
+
+    # Multistreaming engine
+    ffmpeg_path: str = Field(default='ffmpeg', alias='FFMPEG_PATH')
+    ytdlp_path: str = Field(default='yt-dlp', alias='YTDLP_PATH')
+    stream_video_bitrate: str = Field(default='4500k', alias='STREAM_VIDEO_BITRATE')
+    stream_audio_bitrate: str = Field(default='160k', alias='STREAM_AUDIO_BITRATE')
+    stream_buffer_size: str = Field(default='9000k', alias='STREAM_BUFFER_SIZE')
+    stream_fps: int = Field(default=30, alias='STREAM_FPS')
+    stream_gop: int = Field(default=60, alias='STREAM_GOP')
+    stream_fallback_preset: str = Field(default='veryfast', alias='STREAM_FALLBACK_PRESET')
+    stream_graceful_stop_seconds: int = Field(default=8, alias='STREAM_GRACEFUL_STOP_SECONDS')
+
     # Download center. Direct downloads only; Google Play pages are reported, not bypassed.
     download_allow_html: bool = Field(default=False, alias='DOWNLOAD_ALLOW_HTML')
 
@@ -118,6 +142,10 @@ class Settings(BaseSettings):
     @property
     def allowed_commands(self) -> set[str]:
         return {item.strip() for item in self.agent_allowed_commands.split(',') if item.strip()}
+
+    @property
+    def blocked_commands(self) -> set[str]:
+        return {item.strip() for item in self.agent_blocked_commands.split(',') if item.strip()}
 
     def ensure_dirs(self) -> None:
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)

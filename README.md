@@ -296,3 +296,39 @@ STREAM_GRACEFUL_STOP_SECONDS=8
 ### ملاحظة تشغيل
 
 على Railway يجب أن تكون الخطة والموارد مناسبة، لأن FFmpeg يستهلك CPU وBandwidth. للبث المستقر متعدد الوجهات يفضّل VPS.
+
+---
+
+## تحديثات البث المباشر
+
+راجع الملف `STREAMING_DEPLOY.md` لمعرفة أوامر البث، إضافة قنوات تليجرام، بث الصوت كفيديو، ومتغيرات النشر المطلوبة.
+
+## Auto Project Normalizer Report
+
+This project was normalized automatically after archive extraction.
+
+- Detected project type: `python`
+- Original detected root: `/tmp/moataz_repo_agent/8549357772/moataz-repo-agent-pro-streaming-plus-2_replace_extracted`
+- Normalized root: repository root
+- Suitable platforms: `Railway, Render, Docker`
+
+### Run locally
+
+```bash
+# Node / Next.js projects
+npm install
+npm run build
+npm start
+
+# Python projects
+pip install -r requirements.txt
+python main.py
+```
+
+### Deploy
+
+1. Add the environment variables listed in `.env.example`.
+2. Deploy on Railway, Render, Docker, or Vercel according to the detected project type.
+3. Do not commit real secrets to the repository.
+
+> Structural normalization does not guarantee that application code is bug-free. Runtime success depends on valid code, environment variables, database access, and external service keys.

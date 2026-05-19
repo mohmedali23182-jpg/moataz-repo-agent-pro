@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     # Multistreaming engine
     ffmpeg_path: str = Field(default='ffmpeg', alias='FFMPEG_PATH')
     ytdlp_path: str = Field(default='yt-dlp', alias='YTDLP_PATH')
+    ytdlp_js_runtime: str = Field(default='deno', alias='YTDLP_JS_RUNTIME')
+    ytdlp_cookies_path: str = Field(default='', alias='YTDLP_COOKIES_PATH')
+    stream_audio_cover_image: str = Field(default='', alias='STREAM_AUDIO_COVER_IMAGE')
+    stream_audio_canvas_size: str = Field(default='1280x720', alias='STREAM_AUDIO_CANVAS_SIZE')
+    stream_audio_canvas_bitrate: str = Field(default='1500k', alias='STREAM_AUDIO_CANVAS_BITRATE')
+    stream_audio_canvas_buffer_size: str = Field(default='3000k', alias='STREAM_AUDIO_CANVAS_BUFFER_SIZE')
     stream_video_bitrate: str = Field(default='4500k', alias='STREAM_VIDEO_BITRATE')
     stream_audio_bitrate: str = Field(default='160k', alias='STREAM_AUDIO_BITRATE')
     stream_buffer_size: str = Field(default='9000k', alias='STREAM_BUFFER_SIZE')

@@ -31,15 +31,14 @@ from app.agent.executor import execute_plan
 from app.agent.memory import index_repository_memory, memory_status
 from app.agent.sandbox import sandbox_run_github_actions
 from app.services.streaming import streaming_manager
-from app.bot.streaming_handlers import router as streaming_router
 
 router = Router()
-router.include_router(streaming_router)
 store = Store()
 settings = get_settings()
 PENDING_TERMINAL: dict[int, dict] = {}
 PENDING_PLANS: dict[int, dict] = {}
 PENDING_STREAMS: dict[int, dict] = {}
+PENDING_STREAM_CHANNELS: dict[int, dict] = {}
 
 
 def is_owner(user_id: int) -> bool:
@@ -1622,21 +1621,44 @@ async def ask_ai_cmd(message: Message):
 # -------------------------
 # Multistreaming bot section
 # -------------------------
+def _stream_source_type(source: str) -> str:
+    lower = source.lower().strip()
+    if 'youtube.com/' in lower or 'youtu.be/' in lower or 'music.youtube.com/' in lower:
+        return 'youtube'
+    if lower.startswith(('http://', 'https://')):
+        return 'direct_audio' if lower.split('?', 1)[0].endswith(('.mp3', '.m4a', '.aac', '.wav', '.ogg', '.flac', '.opus')) else 'direct_video'
+    if lower.endswith(('.mp3', '.m4a', '.aac', '.wav', '.ogg', '.flac', '.opus')):
+        return 'audio'
+    return 'video'
+
+
 def _stream_menu_text(uid: int) -> str:
     status = streaming_manager.status()
     platforms = store.list_stream_platforms(uid)
+    channels = store.list_stream_channels(uid)
+    ready_channels = [c for c in channels if c.get('rtmp_url') and c.get('has_stream_key')]
     lines = [
         '<b>🎥 مركز البث المباشر</b>',
         '',
         f"الحالة: <b>{'نشط ✅' if status.get('active') else 'متوقف ⚫'}</b>",
-        f"عدد المنصات المحفوظة: <b>{len(platforms)}</b>",
+        f"منصات RTMP عامة: <b>{len(platforms)}</b>",
+        f"قنوات تليجرام مسجلة: <b>{len(channels)}</b>",
+        f"قنوات جاهزة للبث: <b>{len(ready_channels)}</b>",
         '',
-        '<b>الأوامر:</b>',
-        '• <code>/stream_platform اسم النوع RTMP_URL STREAM_KEY</code>',
-        '• <code>/stream_start رابط_يوتيوب_أو_مسار_ملف</code>',
+        '<b>أوامر التشغيل:</b>',
+        '• <code>/stream_start رابط_يوتيوب_أو_مسار_فيديو</code>',
+        '• <code>/stream_audio مسار_صوت_محلي</code>',
         '• <code>/stream_status</code>',
         '• <code>/stream_stop</code>',
         '',
+        '<b>قنوات تليجرام:</b>',
+        '• <code>/stream_add_channel @username</code>',
+        '• <code>/stream_channels</code>',
+        '• <code>/stream_set_channel_rtmp @username RTMP_URL STREAM_KEY</code>',
+        '• <code>/stream_remove_channel @username</code>',
+        '',
+        '<b>وجهات RTMP عامة:</b>',
+        '• <code>/stream_platform اسم النوع RTMP_URL STREAM_KEY</code>',
         'الأنواع: <code>facebook x instagram telegram custom</code>',
     ]
     return '\n'.join(lines)
@@ -1644,8 +1666,10 @@ def _stream_menu_text(uid: int) -> str:
 
 def _stream_keyboard(active: bool = False) -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton(text='🎬 بدء بث', callback_data='stream_start_help'), InlineKeyboardButton(text='📊 الحالة', callback_data='stream_status')],
-        [InlineKeyboardButton(text='🔑 المنصات', callback_data='stream_platforms'), InlineKeyboardButton(text='➕ إضافة منصة', callback_data='stream_add_help')],
+        [InlineKeyboardButton(text='▶️ بدء بث فيديو/يوتيوب', callback_data='stream_start_help'), InlineKeyboardButton(text='🎧 بث صوت', callback_data='stream_audio_help')],
+        [InlineKeyboardButton(text='📡 قنوات البث', callback_data='stream_channels'), InlineKeyboardButton(text='🔑 منصات RTMP', callback_data='stream_platforms')],
+        [InlineKeyboardButton(text='➕ إضافة قناة', callback_data='stream_add_channel_help'), InlineKeyboardButton(text='➕ إضافة RTMP', callback_data='stream_add_help')],
+        [InlineKeyboardButton(text='📊 حالة البث', callback_data='stream_status')],
     ]
     if active:
         rows.append([InlineKeyboardButton(text='🛑 إيقاف البث', callback_data='stream_stop')])
@@ -1658,15 +1682,50 @@ def _platform_url(row: dict) -> str:
     return f'{base}/{key}'
 
 
-def _select_platforms_keyboard(uid: int, selected: set[int]) -> InlineKeyboardMarkup:
-    platforms = store.list_stream_platforms(uid, enabled_only=True)
+def _all_selectable_destinations(uid: int) -> list[dict]:
+    items: list[dict] = []
+    for c in store.list_stream_channels(uid, enabled_only=True, with_rtmp_only=True):
+        items.append({'kind': 'channel', 'id': int(c['id']), 'label': f"✈️ {c.get('title') or c.get('username')}", 'raw': c})
+    for p in store.list_stream_platforms(uid, enabled_only=True):
+        items.append({'kind': 'platform', 'id': int(p['id']), 'label': f"🔗 {p['platform_type']} · {p['name']}", 'raw': p})
+    return items
+
+
+def _select_destinations_keyboard(uid: int, selected: set[str]) -> InlineKeyboardMarkup:
     rows = []
-    for p in platforms:
-        pid = int(p['id'])
-        mark = '✅' if pid in selected else '⬜'
-        rows.append([InlineKeyboardButton(text=f"{mark} {p['platform_type']} · {p['name']}", callback_data=f'stream_toggle:{pid}')])
-    rows.append([InlineKeyboardButton(text='🚀 تشغيل الآن', callback_data='stream_confirm'), InlineKeyboardButton(text='❌ إلغاء', callback_data='stream_cancel')])
+    for item in _all_selectable_destinations(uid):
+        token = f"{item['kind']}:{item['id']}"
+        mark = '✅' if token in selected else '⬜'
+        rows.append([InlineKeyboardButton(text=f"{mark} {item['label']}", callback_data=f'stream_toggle:{token}')])
+    rows.append([InlineKeyboardButton(text='🚀 بدء البث الآن', callback_data='stream_confirm'), InlineKeyboardButton(text='❌ إلغاء', callback_data='stream_cancel')])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _mask_key(value: str | None = None) -> str:
+    return '********' if value else 'غير مضبوط'
+
+
+async def _download_stream_media(message: Message) -> str | None:
+    media = message.audio or message.voice or message.video or message.document
+    if not media:
+        return None
+    filename = getattr(media, 'file_name', '') or f'telegram_media_{media.file_id}'
+    safe_name = ''.join(ch if ch.isalnum() or ch in '._-' else '_' for ch in filename)[-120:]
+    media_dir = Path(settings.work_dir) / 'stream_media'
+    media_dir.mkdir(parents=True, exist_ok=True)
+    target = media_dir / f'{message.from_user.id}_{int(message.date.timestamp())}_{safe_name}'
+    file = await message.bot.get_file(media.file_id)
+    await message.bot.download_file(file.file_path, destination=target)
+    return str(target)
+
+
+async def _start_source_selection(message: Message, source: str, mode: str = 'auto') -> None:
+    platforms = _all_selectable_destinations(message.from_user.id)
+    if not platforms:
+        await message.answer('❌ لا توجد قنوات أو منصات جاهزة. أضف قناة واضبط RTMP أولًا عبر /stream_add_channel ثم /stream_set_channel_rtmp')
+        return
+    PENDING_STREAMS[message.from_user.id] = {'source': source, 'selected': set(), 'mode': mode}
+    await message.answer('اختر وجهات البث:', reply_markup=_select_destinations_keyboard(message.from_user.id, set()))
 
 
 @router.message(Command('stream'))
@@ -1674,6 +1733,30 @@ async def stream_menu_cmd(message: Message):
     if not is_owner(message.from_user.id):
         return
     await message.answer(_stream_menu_text(message.from_user.id), reply_markup=_stream_keyboard(streaming_manager.is_active()))
+
+
+@router.message(Command('stream_audio'))
+async def stream_audio_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    source = message.text.replace('/stream_audio', '', 1).strip()
+    if not source:
+        PENDING_STREAMS[message.from_user.id] = {'awaiting_media': 'audio'}
+        await message.answer('أرسل مسار ملف صوتي مثل:\n<code>/stream_audio /app/media/audio.mp3</code>\nأو أرسل الملف الصوتي الآن كملف/Audio.')
+        return
+    await _start_source_selection(message, source, mode='audio')
+
+
+@router.message(Command('stream_start'))
+async def stream_start_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    source = message.text.replace('/stream_start', '', 1).strip()
+    if not source:
+        PENDING_STREAMS[message.from_user.id] = {'awaiting_media': 'video'}
+        await message.answer('أرسل المصدر:\n<code>/stream_start https://youtube.com/watch?v=...</code>\nأو\n<code>/stream_start /app/media/video.mp4</code>\nأو أرسل فيديو/ملف الآن.')
+        return
+    await _start_source_selection(message, source, mode='auto')
 
 
 @router.message(Command('stream_platform'))
@@ -1708,26 +1791,143 @@ async def stream_platforms_cmd(message: Message):
     if not platforms:
         await message.answer('لا توجد منصات محفوظة. استخدم /stream_platform لإضافة وجهة RTMP.')
         return
-    lines = ['<b>🔑 منصات البث المحفوظة</b>']
+    lines = ['<b>🔑 منصات RTMP المحفوظة</b>']
     for p in platforms:
-        lines.append(f"#{p['id']} {'✅' if p['enabled'] else '⛔'} <b>{html.escape(p['name'])}</b> · <code>{html.escape(p['platform_type'])}</code> · <code>{html.escape(p['rtmp_url'])}</code>")
+        lines.append(f"#{p['id']} {'✅' if p['enabled'] else '⛔'} <b>{html.escape(p['name'])}</b> · <code>{html.escape(p['platform_type'])}</code> · <code>{html.escape(p['rtmp_url'])}</code> · key: <code>********</code>")
     await message.answer('\n'.join(lines)[:3900])
 
 
-@router.message(Command('stream_start'))
-async def stream_start_cmd(message: Message):
+@router.message(Command('stream_add_channel'))
+async def stream_add_channel_cmd(message: Message):
     if not is_owner(message.from_user.id):
         return
-    source = message.text.replace('/stream_start', '', 1).strip()
-    if not source:
-        await message.answer('أرسل المصدر:\n<code>/stream_start https://youtube.com/watch?v=...</code>\nأو\n<code>/stream_start /app/media/video.mp4</code>')
+    value = message.text.replace('/stream_add_channel', '', 1).strip()
+    if not value:
+        PENDING_STREAM_CHANNELS[message.from_user.id] = {'action': 'add_channel'}
+        await message.answer('أرسل username القناة مثل <code>@M_A_De</code> أو أعد توجيه رسالة من القناة.')
         return
-    platforms = store.list_stream_platforms(message.from_user.id, enabled_only=True)
-    if not platforms:
-        await message.answer('❌ لا توجد منصات مفعلة. أضف منصة أولًا عبر /stream_platform')
+    await _register_stream_channel_from_value(message, value)
+
+
+async def _register_stream_channel_from_value(message: Message, value: str) -> None:
+    username = value.strip()
+    if username and not username.startswith('@'):
+        username = '@' + username
+    try:
+        chat = await message.bot.get_chat(username)
+        bot_me = await message.bot.get_me()
+        try:
+            member = await message.bot.get_chat_member(chat.id, bot_me.id)
+            status = getattr(member, 'status', '')
+        except Exception:
+            status = 'unknown'
+        store.add_stream_channel(
+            message.from_user.id,
+            chat_id=chat.id,
+            username=chat.username and ('@' + chat.username) or username,
+            title=chat.title or username,
+        )
+        note = '' if status in {'administrator', 'creator'} else '\n⚠️ لم أستطع تأكيد أن البوت مشرف. تأكد من صلاحياته في القناة.'
+        await message.answer(f"✅ تم تسجيل القناة: <b>{html.escape(chat.title or username)}</b>\nID: <code>{chat.id}</code>{note}\n\nالخطوة التالية:\n<code>/stream_set_channel_rtmp {html.escape(username)} RTMP_URL STREAM_KEY</code>")
+    except Exception as e:
+        await message.answer('❌ فشل تسجيل القناة. تأكد أن username صحيح وأن البوت مضاف للقناة كمشرف.\n<code>' + html.escape(str(e)[:1000]) + '</code>')
+
+
+@router.message(Command('stream_channels'))
+async def stream_channels_cmd(message: Message):
+    if not is_owner(message.from_user.id):
         return
-    PENDING_STREAMS[message.from_user.id] = {'source': source, 'selected': set()}
-    await message.answer('اختر وجهات البث:', reply_markup=_select_platforms_keyboard(message.from_user.id, set()))
+    channels = store.list_stream_channels(message.from_user.id)
+    if not channels:
+        await message.answer('لا توجد قنوات مسجلة. استخدم /stream_add_channel @username')
+        return
+    lines = ['<b>📡 قنوات تليجرام المسجلة</b>']
+    for c in channels:
+        ready = 'جاهزة ✅' if c.get('rtmp_url') and c.get('has_stream_key') else 'RTMP ناقص ⚠️'
+        lines.append(f"#{c['id']} {'✅' if c['enabled'] else '⛔'} <b>{html.escape(c.get('title') or '')}</b> · <code>{html.escape(c.get('username') or '')}</code> · {ready} · key: <code>{_mask_key(c.get('stream_key'))}</code>")
+    await message.answer('\n'.join(lines)[:3900])
+
+
+@router.message(Command('stream_set_channel_rtmp'))
+async def stream_set_channel_rtmp_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    rest = message.text.replace('/stream_set_channel_rtmp', '', 1).strip()
+    parts = rest.split(maxsplit=2)
+    if len(parts) < 3:
+        await message.answer('استخدم:\n<code>/stream_set_channel_rtmp @M_A_De rtmps://dc4-1.rtmp.t.me/s STREAM_KEY</code>')
+        return
+    identifier, rtmp_url, stream_key = parts
+    if not (rtmp_url.startswith('rtmp://') or rtmp_url.startswith('rtmps://')):
+        await message.answer('❌ RTMP URL يجب أن يبدأ بـ rtmp:// أو rtmps://')
+        return
+    ok = store.set_stream_channel_rtmp(message.from_user.id, identifier, rtmp_url, stream_key)
+    try:
+        await message.delete()
+    except Exception:
+        pass
+    await message.answer('✅ تم ضبط RTMP للقناة وتشفير المفتاح.' if ok else '❌ لم أجد القناة. أضفها أولًا عبر /stream_add_channel')
+
+
+@router.message(Command('stream_remove_channel'))
+async def stream_remove_channel_cmd(message: Message):
+    if not is_owner(message.from_user.id):
+        return
+    identifier = message.text.replace('/stream_remove_channel', '', 1).strip()
+    if not identifier:
+        await message.answer('استخدم: <code>/stream_remove_channel @username</code> أو <code>/stream_remove_channel ID</code>')
+        return
+    ok = store.delete_stream_channel(message.from_user.id, identifier)
+    await message.answer('✅ تم حذف القناة.' if ok else '❌ لم أجد القناة.')
+
+
+@router.message(F.forward_from_chat)
+async def stream_forwarded_channel_handler(message: Message):
+    pending = PENDING_STREAM_CHANNELS.get(message.from_user.id)
+    if not pending or pending.get('action') != 'add_channel':
+        return
+    if not is_owner(message.from_user.id):
+        return
+    chat = message.forward_from_chat
+    username = chat.username and ('@' + chat.username) or ''
+    if not username:
+        await message.answer('❌ الرسالة المحولة لا تحتوي username عام للقناة. أرسل username يدويًا مثل @M_A_De')
+        return
+    PENDING_STREAM_CHANNELS.pop(message.from_user.id, None)
+    await _register_stream_channel_from_value(message, username)
+
+
+@router.message(F.audio | F.voice | F.video | F.document)
+async def stream_uploaded_media_handler(message: Message):
+    pending = PENDING_STREAMS.get(message.from_user.id) or {}
+    awaiting = pending.get('awaiting_media')
+    if not awaiting:
+        return
+    if not is_owner(message.from_user.id):
+        return
+    try:
+        path = await _download_stream_media(message)
+        if not path:
+            await message.answer('❌ لم أستطع قراءة الملف.')
+            return
+        await _start_source_selection(message, path, mode=awaiting)
+    except Exception as e:
+        await send_error(message, e)
+
+
+@router.message(F.text)
+async def stream_pending_text_handler(message: Message):
+    # This handler only consumes text when a streaming workflow is explicitly waiting.
+    pending_channel = PENDING_STREAM_CHANNELS.get(message.from_user.id)
+    if pending_channel and pending_channel.get('action') == 'add_channel':
+        PENDING_STREAM_CHANNELS.pop(message.from_user.id, None)
+        await _register_stream_channel_from_value(message, message.text.strip())
+        return
+    pending = PENDING_STREAMS.get(message.from_user.id) or {}
+    awaiting = pending.get('awaiting_media')
+    if awaiting:
+        source = message.text.strip()
+        await _start_source_selection(message, source, mode=awaiting)
 
 
 @router.message(Command('stream_status'))
@@ -1740,15 +1940,20 @@ async def stream_status_cmd(message: Message):
         '<b>📊 حالة البث</b>',
         f"نشط: <b>{'نعم ✅' if status.get('active') else 'لا ⚫'}</b>",
         f"الحالة: <code>{html.escape(str(status.get('status', 'offline')))}</code>",
+        f"المصدر: <code>{html.escape(str(status.get('source') or '-'))[:700]}</code>",
+        f"نوع المصدر: <code>{html.escape(str(status.get('source_type') or '-'))}</code>",
         f"PID: <code>{html.escape(str(status.get('pid') or '-'))}</code>",
         f"الوجهات: <b>{status.get('destinations_count', 0)}</b>",
     ]
+    if status.get('started_at'):
+        lines.append(f"بدأ: <code>{html.escape(str(status.get('started_at')))}</code>")
     if status.get('error'):
         lines.append(f"خطأ: <code>{html.escape(str(status.get('error'))[:1000])}</code>")
     if history:
         lines.append('\n<b>آخر السجلات:</b>')
         for h in history:
-            lines.append(f"#{h['id']} · <code>{html.escape(h['status'])}</code> · {html.escape(h['title'])}")
+            chans = h.get('selected_channels') or []
+            lines.append(f"#{h['id']} · <code>{html.escape(h['status'])}</code> · {html.escape(h['source_type'])} · قنوات: {len(chans)}")
     await message.answer('\n'.join(lines)[:3900], reply_markup=_stream_keyboard(streaming_manager.is_active()))
 
 
@@ -1768,16 +1973,42 @@ async def stream_menu_cb(call: CallbackQuery):
     await call.message.answer(_stream_menu_text(call.from_user.id), reply_markup=_stream_keyboard(streaming_manager.is_active()))
 
 
+@router.callback_query(F.data == 'stream_audio_help')
+async def stream_audio_help_cb(call: CallbackQuery):
+    await call.answer()
+    await call.message.answer('بث صوت محلي كفيديو:\n<code>/stream_audio /app/media/audio.mp3</code>\nأو اضغط الأمر بدون مسار ثم أرسل الملف الصوتي.\nإذا ضبطت STREAM_AUDIO_COVER_IMAGE سيتم بث الصورة مع الصوت، وإلا شاشة سوداء.')
+
+
+@router.callback_query(F.data == 'stream_add_channel_help')
+async def stream_add_channel_help_cb(call: CallbackQuery):
+    await call.answer()
+    await call.message.answer('أضف قناة تليجرام:\n<code>/stream_add_channel @M_A_De</code>\nثم اضبط RTMP:\n<code>/stream_set_channel_rtmp @M_A_De rtmps://dc4-1.rtmp.t.me/s STREAM_KEY</code>')
+
+
 @router.callback_query(F.data == 'stream_add_help')
 async def stream_add_help_cb(call: CallbackQuery):
     await call.answer()
-    await call.message.answer('أضف منصة هكذا:\n<code>/stream_platform Facebook facebook rtmps://live-api-s.facebook.com:443/rtmp STREAM_KEY</code>')
+    await call.message.answer('أضف منصة RTMP عامة هكذا:\n<code>/stream_platform Facebook facebook rtmps://live-api-s.facebook.com:443/rtmp STREAM_KEY</code>')
 
 
 @router.callback_query(F.data == 'stream_start_help')
 async def stream_start_help_cb(call: CallbackQuery):
     await call.answer()
-    await call.message.answer('ابدأ هكذا:\n<code>/stream_start https://youtube.com/watch?v=...</code>\nثم اختر المنصات بالأزرار.')
+    await call.message.answer('ابدأ بث فيديو/يوتيوب هكذا:\n<code>/stream_start https://youtube.com/watch?v=...</code>\nأو:\n<code>/stream_start /app/media/video.mp4</code>\nثم اختر القنوات أو المنصات بالأزرار.')
+
+
+@router.callback_query(F.data == 'stream_channels')
+async def stream_channels_cb(call: CallbackQuery):
+    await call.answer()
+    channels = store.list_stream_channels(call.from_user.id)
+    if not channels:
+        await call.message.answer('لا توجد قنوات مسجلة. استخدم /stream_add_channel @username')
+        return
+    lines = ['<b>📡 قنوات تليجرام المسجلة</b>']
+    for c in channels:
+        ready = 'جاهزة ✅' if c.get('rtmp_url') and c.get('has_stream_key') else 'RTMP ناقص ⚠️'
+        lines.append(f"#{c['id']} {'✅' if c['enabled'] else '⛔'} <b>{html.escape(c.get('title') or '')}</b> · <code>{html.escape(c.get('username') or '')}</code> · {ready}")
+    await call.message.answer('\n'.join(lines)[:3900])
 
 
 @router.callback_query(F.data == 'stream_platforms')
@@ -1787,9 +2018,9 @@ async def stream_platforms_cb(call: CallbackQuery):
     if not platforms:
         await call.message.answer('لا توجد منصات محفوظة. استخدم /stream_platform لإضافة وجهة RTMP.')
         return
-    lines = ['<b>🔑 منصات البث المحفوظة</b>']
+    lines = ['<b>🔑 منصات RTMP المحفوظة</b>']
     for p in platforms:
-        lines.append(f"#{p['id']} {'✅' if p['enabled'] else '⛔'} <b>{html.escape(p['name'])}</b> · <code>{html.escape(p['platform_type'])}</code> · <code>{html.escape(p['rtmp_url'])}</code>")
+        lines.append(f"#{p['id']} {'✅' if p['enabled'] else '⛔'} <b>{html.escape(p['name'])}</b> · <code>{html.escape(p['platform_type'])}</code> · <code>{html.escape(p['rtmp_url'])}</code> · key: <code>********</code>")
     await call.message.answer('\n'.join(lines)[:3900])
 
 
@@ -1798,14 +2029,14 @@ async def stream_toggle_cb(call: CallbackQuery):
     if not is_owner(call.from_user.id):
         return
     await call.answer()
-    pid = int(call.data.split(':', 1)[1])
-    pending = PENDING_STREAMS.setdefault(call.from_user.id, {'source': '', 'selected': set()})
-    selected: set[int] = pending.setdefault('selected', set())
-    if pid in selected:
-        selected.remove(pid)
+    token = call.data.split(':', 1)[1]
+    pending = PENDING_STREAMS.setdefault(call.from_user.id, {'source': '', 'selected': set(), 'mode': 'auto'})
+    selected: set[str] = pending.setdefault('selected', set())
+    if token in selected:
+        selected.remove(token)
     else:
-        selected.add(pid)
-    await call.message.edit_reply_markup(reply_markup=_select_platforms_keyboard(call.from_user.id, selected))
+        selected.add(token)
+    await call.message.edit_reply_markup(reply_markup=_select_destinations_keyboard(call.from_user.id, selected))
 
 
 @router.callback_query(F.data == 'stream_cancel')
@@ -1822,47 +2053,59 @@ async def stream_confirm_cb(call: CallbackQuery):
     await call.answer()
     pending = PENDING_STREAMS.get(call.from_user.id) or {}
     source = pending.get('source') or ''
-    selected = list(pending.get('selected') or [])
+    selected = set(pending.get('selected') or set())
     if not source:
-        await call.message.answer('❌ لا يوجد مصدر محفوظ. استخدم /stream_start من جديد.')
+        await call.message.answer('❌ لا يوجد مصدر محفوظ. استخدم /stream_start أو /stream_audio من جديد.')
         return
     if not selected:
-        await call.message.answer('❌ اختر منصة واحدة على الأقل.')
+        await call.message.answer('❌ اختر قناة أو منصة واحدة على الأقل.')
         return
-    rows = store.get_stream_platforms_by_ids(call.from_user.id, [int(x) for x in selected])
-    if not rows:
-        await call.message.answer('❌ لم أجد منصات مفعلة صالحة.')
+
+    channel_ids = [int(x.split(':', 1)[1]) for x in selected if x.startswith('channel:')]
+    platform_ids = [int(x.split(':', 1)[1]) for x in selected if x.startswith('platform:')]
+    channels = store.get_stream_channels_by_ids(call.from_user.id, channel_ids)
+    platforms = store.get_stream_platforms_by_ids(call.from_user.id, platform_ids)
+    if not channels and not platforms:
+        await call.message.answer('❌ لم أجد وجهات مفعلة وجاهزة. تأكد من ضبط RTMP للقنوات.')
         return
-    destinations = [_platform_url(r) for r in rows]
-    title = f'Telegram multistream {time_now_short()}'
+
+    destinations = [_platform_url(c) for c in channels] + [_platform_url(p) for p in platforms]
+    source_type = _stream_source_type(source)
+    title = f'Multistream {source_type} {time_now_short()}'
     hist_id = store.create_stream_history(
         telegram_id=call.from_user.id,
         title=title,
         source=source,
-        source_type='youtube' if ('youtube.com/' in source or 'youtu.be/' in source) else 'file_or_direct',
+        source_type=source_type,
         status='starting',
-        destinations=[{'id': r['id'], 'name': r['name'], 'type': r['platform_type']} for r in rows],
+        destinations=[{'id': p['id'], 'name': p['name'], 'type': p['platform_type']} for p in platforms],
+        selected_channels=[{'id': c['id'], 'title': c.get('title'), 'username': c.get('username')} for c in channels],
     )
     msg = await call.message.answer('⏳ جاري تشغيل FFmpeg وتجهيز البث...')
     try:
         session = await streaming_manager.start(source=source, destinations=destinations, title=title, prefer_copy=True)
+
         async def on_stream_event(event: str, payload: dict) -> None:
             if event == 'active':
                 store.update_stream_history(hist_id, status='active', pid=payload.get('pid'))
                 try:
-                    await msg.edit_text(f"✅ بدأ البث بنجاح.\nPID: <code>{payload.get('pid')}</code>", reply_markup=_stream_keyboard(True))
+                    await msg.edit_text(
+                        f"✅ بدأ البث بنجاح.\nPID: <code>{payload.get('pid')}</code>\nالقنوات: <b>{len(channels)}</b>\nالمنصات: <b>{len(platforms)}</b>",
+                        reply_markup=_stream_keyboard(True),
+                    )
                 except Exception:
                     pass
             elif event == 'error':
                 store.update_stream_history(hist_id, status='failed', error=str(payload.get('error') or ''), ended=True)
-                await call.message.answer('❌ فشل البث:\n<code>' + html.escape(str(payload.get('error') or '')[:1200]) + '</code>', reply_markup=_stream_keyboard(False))
+                await call.message.answer('❌ فشل البث:\n<code>' + html.escape(str(payload.get('error') or '')[:1600]) + '</code>', reply_markup=_stream_keyboard(False))
             elif event == 'end':
                 store.update_stream_history(hist_id, status='completed', ended=True)
+
         session.on(on_stream_event)
         PENDING_STREAMS.pop(call.from_user.id, None)
     except Exception as e:
         store.update_stream_history(hist_id, status='failed', error=str(e), ended=True)
-        await msg.edit_text('❌ فشل تشغيل البث:\n<code>' + html.escape(str(e)[:1200]) + '</code>', reply_markup=_stream_keyboard(False))
+        await msg.edit_text('❌ فشل تشغيل البث:\n<code>' + html.escape(str(e)[:1600]) + '</code>', reply_markup=_stream_keyboard(False))
 
 
 @router.callback_query(F.data == 'stream_status')
@@ -1870,11 +2113,21 @@ async def stream_status_cb(call: CallbackQuery):
     await call.answer()
     status = streaming_manager.status()
     history = store.latest_stream_history(call.from_user.id, limit=3)
-    lines = ['<b>📊 حالة البث</b>', f"نشط: <b>{'نعم ✅' if status.get('active') else 'لا ⚫'}</b>", f"الحالة: <code>{html.escape(str(status.get('status', 'offline')))}</code>"]
+    lines = [
+        '<b>📊 حالة البث</b>',
+        f"نشط: <b>{'نعم ✅' if status.get('active') else 'لا ⚫'}</b>",
+        f"الحالة: <code>{html.escape(str(status.get('status', 'offline')))}</code>",
+        f"PID: <code>{html.escape(str(status.get('pid') or '-'))}</code>",
+        f"الوجهات: <b>{status.get('destinations_count', 0)}</b>",
+    ]
+    if status.get('source'):
+        lines.append(f"المصدر: <code>{html.escape(str(status.get('source'))[:700])}</code>")
+    if status.get('error'):
+        lines.append(f"خطأ: <code>{html.escape(str(status.get('error'))[:1000])}</code>")
     if history:
         lines.append('\n<b>آخر السجلات:</b>')
         for h in history:
-            lines.append(f"#{h['id']} · <code>{html.escape(h['status'])}</code> · {html.escape(h['title'])}")
+            lines.append(f"#{h['id']} · <code>{html.escape(h['status'])}</code> · {html.escape(h['source_type'])}")
     await call.message.answer('\n'.join(lines)[:3900], reply_markup=_stream_keyboard(streaming_manager.is_active()))
 
 

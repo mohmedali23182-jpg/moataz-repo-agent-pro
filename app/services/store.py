@@ -155,6 +155,32 @@ class Store:
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(telegram_id, repo_full)
         )''')
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS stream_channels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            chat_id TEXT NOT NULL,
+            username TEXT,
+            title TEXT,
+            rtmp_url TEXT,
+            stream_key_enc TEXT,
+            enabled INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(telegram_id, chat_id)
+        )''')
+        self.conn.execute('''CREATE TABLE IF NOT EXISTS stream_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            telegram_id INTEGER NOT NULL,
+            source_type TEXT,
+            source_value TEXT,
+            status TEXT,
+            selected_channels TEXT,
+            ffmpeg_pid INTEGER,
+            error_message TEXT,
+            started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            ended_at TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        )''')
         self.conn.commit()
 
     def _build_fernet(self) -> Fernet:
@@ -593,3 +619,43 @@ class Store:
             result.append(d)
         return result
 
+
+    def add_stream_channel(self, telegram_id: int, chat_id: str, username: str | None, title: str | None, rtmp_url: str | None = None, stream_key: str | None = None) -> None:
+        key_enc = self.encrypt(stream_key) if stream_key else None
+        self.conn.execute('''INSERT INTO stream_channels(telegram_id, chat_id, username, title, rtmp_url, stream_key_enc)
+            VALUES(?,?,?,?,?,?)
+            ON CONFLICT(telegram_id, chat_id) DO UPDATE SET
+              username=excluded.username, title=excluded.title, updated_at=CURRENT_TIMESTAMP''',
+            (telegram_id, str(chat_id), username, title, rtmp_url, key_enc))
+        self.conn.commit()
+
+    def update_stream_channel_rtmp(self, telegram_id: int, chat_id: str, rtmp_url: str, stream_key: str) -> None:
+        self.conn.execute('UPDATE stream_channels SET rtmp_url=?, stream_key_enc=?, updated_at=CURRENT_TIMESTAMP WHERE telegram_id=? AND chat_id=?',
+            (rtmp_url, self.encrypt(stream_key), telegram_id, str(chat_id)))
+        self.conn.commit()
+
+    def remove_stream_channel(self, telegram_id: int, chat_id: str) -> None:
+        self.conn.execute('DELETE FROM stream_channels WHERE telegram_id=? AND chat_id=?', (telegram_id, str(chat_id)))
+        self.conn.commit()
+
+    def list_stream_channels(self, telegram_id: int, only_enabled: bool = False) -> list[dict[str, Any]]:
+        query = 'SELECT * FROM stream_channels WHERE telegram_id=?'
+        if only_enabled:
+            query += ' AND enabled=1'
+        rows = self.conn.execute(query, (telegram_id,)).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d['stream_key'] = self.decrypt(d.get('stream_key_enc'))
+            result.append(d)
+        return result
+
+    def log_stream_start(self, telegram_id: int, source_type: str, source_value: str, channels: list[str], pid: int) -> int:
+        cursor = self.conn.execute('''INSERT INTO stream_history(telegram_id, source_type, source_value, status, selected_channels, ffmpeg_pid)
+            VALUES(?,?,?,?,?,?)''', (telegram_id, source_type, source_value, 'active', json.dumps(channels), pid))
+        self.conn.commit()
+        return cursor.lastrowid
+
+    def log_stream_end(self, history_id: int, status: str, error: str | None = None) -> None:
+        self.conn.execute('UPDATE stream_history SET status=?, error_message=?, ended_at=CURRENT_TIMESTAMP WHERE id=?', (status, error, history_id))
+        self.conn.commit()

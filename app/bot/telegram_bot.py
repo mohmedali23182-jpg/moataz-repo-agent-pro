@@ -31,8 +31,10 @@ from app.agent.executor import execute_plan
 from app.agent.memory import index_repository_memory, memory_status
 from app.agent.sandbox import sandbox_run_github_actions
 from app.services.streaming import streaming_manager
+from app.bot.streaming_handlers import router as streaming_router
 
 router = Router()
+router.include_router(streaming_router)
 store = Store()
 settings = get_settings()
 PENDING_TERMINAL: dict[int, dict] = {}
